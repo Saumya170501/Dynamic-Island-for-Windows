@@ -2,7 +2,7 @@
 // @id              dynamic-island-for-windows
 // @name            Dynamic Island for Windows
 // @description     A living, breathing pill overlay inspired by iPhone's Dynamic Island. Reacts to media, downloads, clipboard, battery, and more.
-// @version         1.5.0
+// @version         1.6.0
 // @author          Himanshu
 // @github          https://github.com/devcode90
 // @include         windhawk.exe
@@ -56,6 +56,7 @@ The Dynamic Island intelligently expands to display context-aware dashboards. Yo
 - **Song Recognition (Shazam):** Identify any track playing on your desktop in seconds — the island listens to your system audio and displays the song title, artist, and cover art with zero API keys required.
 - **WhatsApp replies:** An incoming WhatsApp Desktop message opens on the island. Click it, type a reply, and press Enter to send it through the WhatsApp window.
 - **MetaTrader 5 trades:** Hover the island and scroll to the Trades card to see open positions with live profit. The close button on a row closes that position.
+- **Copilot:** Turn on Copilot under Modules, then right-click the island and choose **Ask Copilot**. Type a message, press Enter, and the reply from the Windows 11 Copilot app is shown on the card.
 - **Quick Lookup:** Once enabled under Modules, press **Ctrl+Alt+Space** to open a search box right on the island. Type a word or phrase, press Enter, and get a definition or a short summary. Your clipboard text and recent searches are one click away.
 - **Lyrics Sync Offset:** Nudge lyric timing in milliseconds when lyrics feel early or late, with a separate value for Bluetooth audio output that is picked automatically from your default audio device. Set it in Mod Settings or from the right-click menu's "Lyrics sync" submenu.
 - **Typography & Clock Control:** Scale all island text independently of the island's size, choose 12- or 24-hour time, show seconds, and set a custom date pattern — including CJK forms like `yyyy年MM月dd日`.
@@ -107,6 +108,7 @@ The Dynamic Island intelligently expands to display context-aware dashboards. Yo
 - **[David Ravelo (DavidRaveloU) @GitHub](https://github.com/DavidRaveloU)**: Added selectable audio spectrum styles with a live frequency analyzer, new progress bar styles, optional track-change animations for the title, cover flip, playback controls and pill cover spin, an optional clock in the collapsed media pill, and a brightness slider flyout.
 - **[Retr0dev-jpg @GitHub](https://github.com/Retr0dev-jpg)**: Event-driven volume flyout with animated bar and default device switching, plus a calendar that follows the Windows locale for weekday initials and first day of the week (with a Monday/Sunday override).
 - **WhatsApp replies and MetaTrader 5 trades**: Incoming WhatsApp Desktop messages can be answered from the island, and a Trades card lists open MetaTrader 5 positions with live profit and a per-row close button.
+- **Copilot**: Right-click the island and choose Ask Copilot to type a message and read the reply from the Windows 11 Copilot app. Off until Modules → Copilot is enabled.
 
 ### 🤝 Contributing
 We love community contributions! To ensure high-quality updates, please follow these rules:
@@ -580,6 +582,9 @@ We love community contributions! To ensure high-quality updates, please follow t
   - Mt5DataPath: ""
     $name: MetaTrader 5 data folder
     $description: Optional. The folder MetaTrader opens with File, Open Data Folder, or the full path of dynamic_island_mt5.txt. Leave blank to search %AppData%\MetaQuotes\Terminal.
+  - Copilot: false
+    $name: Copilot
+    $description: Adds Ask Copilot to the island's right-click menu. Type a message on the card and press Enter. The question is sent to the Copilot app already installed on Windows 11, and the reply is shown on the card. Off by default.
   $name: Modules & Features
 - Shortcuts:
   - HideShowHotkeyEnabled: true
@@ -723,6 +728,7 @@ constexpr UINT WM_APP_MOUSE_WAKE = WM_APP + 0x446;
 constexpr UINT WM_APP_APPLY_HOTKEY = WM_APP + 0x447;
 constexpr UINT WM_APP_APPLY_BACKDROP = WM_APP + 0x448;
 constexpr UINT WM_APP_WHATSAPP_DONE = WM_APP + 0x449;
+constexpr UINT WM_APP_COPILOT_DONE = WM_APP + 0x44A;
 constexpr int ID_HIDE_SHOW_HOTKEY = 1;
 constexpr int ID_LOOKUP_HOTKEY = 2;
 constexpr int ID_SONGID_HOTKEY = 3;
@@ -1077,6 +1083,7 @@ enum class IslandKind {
     Lookup,
     SongId,
     WhatsApp,
+    Copilot,
 };
 
 enum class BluetoothDeviceCategory {
@@ -1302,6 +1309,7 @@ struct Settings {
     // WhatsApp replies and the MetaTrader 5 trades card. Both default off:
     // one sends a chat message, the other can close a live position.
     bool whatsApp = false;
+    bool copilot = false;
     bool mt5 = false;
     std::wstring mt5Account;
     std::wstring mt5DataPath;
@@ -1729,6 +1737,18 @@ struct WhatsAppUiState {
 WhatsAppUiState g_waUi;
 std::atomic<bool> g_waSending{false};
 
+// Compose box for the Copilot card. Window thread only, same rule as g_waUi.
+struct CopilotUiState {
+    bool composing = false;
+    std::wstring text;
+    size_t caret = 0;
+    bool selectAll = false;
+    double caretResetAt = 0.0;
+    HWND prevForeground = nullptr;
+};
+CopilotUiState g_copilotUi;
+std::atomic<bool> g_copilotAsking{false};
+
 enum class SongIdStatus {
     Listening,
     Matching,
@@ -1761,6 +1781,14 @@ struct WhatsAppSnapshot {
     std::wstring body;
     std::wstring status;         // "Sending...", "Sent", or a short failure
     PixelsRef icon;
+    double expiresAt = 0.0;
+};
+
+// A question sent to the Windows 11 Copilot app, and the reply shown on the card.
+struct CopilotSnapshot {
+    bool active = false;
+    std::wstring reply;
+    std::wstring status;         // "Asking...", or a short failure
     double expiresAt = 0.0;
 };
 
@@ -1818,6 +1846,7 @@ struct SharedState {
     LookupSnapshot lookup;
     std::vector<LookupRecent> lookupRecent;  // newest first, guarded by g_stateMutex
     WhatsAppSnapshot whatsApp;
+    CopilotSnapshot copilot;
     Mt5Snapshot mt5;
     std::array<float, 48> waveform{};
     size_t waveformWrite = 0;
@@ -3398,6 +3427,7 @@ void LoadSettings() {
     next.songIdVk = ParseHotkeyKeyName(GetStringSettingCopy(L"Shortcuts.SongIdKey"), 'R');
 
     next.whatsApp = Wh_GetIntSetting(L"Modules.WhatsApp") != 0;
+    next.copilot = Wh_GetIntSetting(L"Modules.Copilot") != 0;
     next.mt5 = Wh_GetIntSetting(L"Modules.Mt5") != 0;
     next.mt5Account = GetStringSettingCopy(L"Modules.Mt5Account");
     next.mt5DataPath = GetStringSettingCopy(L"Modules.Mt5DataPath");
@@ -3415,11 +3445,14 @@ void LoadSettings() {
             next.mt5DataPath = next.mt5DataPath.substr(p, next.mt5DataPath.find_last_not_of(L" \t\r\n\"'") - p + 1);
         }
     }
-    if (!next.whatsApp || !next.mt5) {
+    if (!next.whatsApp || !next.mt5 || !next.copilot) {
         std::lock_guard lock(g_stateMutex);
         if (!next.whatsApp) {
             g_state.whatsApp.active = false;
             g_state.whatsApp.status.clear();
+        }
+        if (!next.copilot) {
+            g_state.copilot = CopilotSnapshot{};
         }
         if (!next.mt5) {
             g_state.mt5 = Mt5Snapshot{};
@@ -6183,6 +6216,7 @@ void UnsubscribeDndNotification() {
 
 void ForceForeground(HWND hwnd);
 void CloseLookupPanel(HWND hwnd);
+void EndCopilotSession(HWND hwnd);
 std::wstring ReadClipboardText(HWND hwnd);
 
 struct WhatsAppSendArgs {
@@ -6284,6 +6318,9 @@ void EndWhatsAppSession(HWND hwnd) {
 void BeginWhatsAppSession(HWND hwnd) {
     if (g_lookupUi.open) {
         CloseLookupPanel(hwnd);
+    }
+    if (g_copilotUi.composing) {
+        EndCopilotSession(hwnd);
     }
     if (g_waUi.composing) {
         ForceForeground(hwnd);
@@ -6693,6 +6730,450 @@ DWORD WINAPI WhatsAppSendThread(void* param) {
     g_waSending.store(false);
     if (HWND hwnd = g_hwnd) {
         PostMessageW(hwnd, WM_APP_WHATSAPP_DONE, ok ? 1 : 0, 0);
+    }
+    TriggerNudge();
+    return 0;
+}
+
+// ── Copilot card ─────────────────────────────────────────────────────────────
+// Asks the Copilot app that ships with Windows 11. There is no supported
+// "send this and return the text" API, so the question is typed into that
+// app's window and the reply is read back onto the card.
+
+void EndCopilotSession(HWND hwnd) {
+    if (!g_copilotUi.composing) return;
+    HWND previous = g_copilotUi.prevForeground;
+    const bool hadFocus = GetForegroundWindow() == hwnd;
+    g_copilotUi.composing = false;
+    g_copilotUi.prevForeground = nullptr;
+    if (g_lookupUi.open || g_waUi.composing) return;
+    const LONG_PTR ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+    SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex | WS_EX_NOACTIVATE);
+    if (hadFocus && previous && IsWindow(previous) && IsWindowVisible(previous)) {
+        SetForegroundWindow(previous);
+    }
+}
+
+void BeginCopilotSession(HWND hwnd) {
+    if (g_lookupUi.open) CloseLookupPanel(hwnd);
+    if (g_waUi.composing) EndWhatsAppSession(hwnd);
+    if (g_copilotUi.composing) {
+        ForceForeground(hwnd);
+        return;
+    }
+    HWND previous = GetForegroundWindow();
+    g_copilotUi.prevForeground = (previous && previous != hwnd) ? previous : nullptr;
+    g_copilotUi.composing = true;
+    g_copilotUi.caretResetAt = NowSeconds();
+    if (g_copilotUi.caret > g_copilotUi.text.size()) g_copilotUi.caret = g_copilotUi.text.size();
+    const LONG_PTR ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+    if (ex & WS_EX_NOACTIVATE) {
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex & ~static_cast<LONG_PTR>(WS_EX_NOACTIVATE));
+    }
+    ForceForeground(hwnd);
+    {
+        std::lock_guard lock(g_stateMutex);
+        if (g_state.copilot.active) {
+            g_state.copilot.expiresAt = std::max(g_state.copilot.expiresAt, NowSeconds() + 60.0);
+        }
+    }
+    g_layoutDirty = true;
+}
+
+void OpenCopilotCard(HWND hwnd) {
+    if (!g_settings.copilot) return;
+    {
+        std::lock_guard lock(g_stateMutex);
+        g_state.copilot.active = true;
+        g_state.copilot.expiresAt = NowSeconds() + 60.0;
+    }
+    BeginCopilotSession(hwnd);
+    TriggerNudge();
+}
+
+void InsertCopilotText(std::wstring extra) {
+    if (extra.empty()) return;
+    CopilotUiState& ui = g_copilotUi;
+    if (ui.selectAll) {
+        ui.text.clear();
+        ui.caret = 0;
+        ui.selectAll = false;
+    }
+    constexpr size_t kMaxPrompt = 400;
+    if (ui.text.size() >= kMaxPrompt) return;
+    if (ui.text.size() + extra.size() > kMaxPrompt) extra.resize(kMaxPrompt - ui.text.size());
+    ui.text.insert(ui.caret, extra);
+    ui.caret += extra.size();
+    ui.caretResetAt = NowSeconds();
+    g_layoutDirty = true;
+}
+
+struct CopilotAskArgs {
+    std::wstring text;
+};
+DWORD WINAPI CopilotAskThread(void* param);
+
+bool HandleCopilotKeyDown(HWND hwnd, WPARAM vk) {
+    if (!g_copilotUi.composing) return false;
+    CopilotUiState& ui = g_copilotUi;
+    const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+    switch (vk) {
+        case VK_ESCAPE:
+            {
+                std::lock_guard lock(g_stateMutex);
+                g_state.copilot.active = false;
+                g_state.copilot.expiresAt = 0.0;
+            }
+            EndCopilotSession(hwnd);
+            g_layoutDirty = true;
+            return true;
+        case VK_RETURN:
+            if (!g_copilotAsking.load()) {
+                std::wstring text = TrimCopy(ui.text);
+                if (!text.empty()) {
+                    {
+                        std::lock_guard lock(g_stateMutex);
+                        g_state.copilot.reply.clear();
+                        g_state.copilot.status = L"Asking...";
+                        g_state.copilot.expiresAt = NowSeconds() + 45.0;
+                        g_state.copilot.active = true;
+                    }
+                    g_copilotAsking.store(true);
+                    EndCopilotSession(hwnd);
+                    auto* args = new CopilotAskArgs{std::move(text)};
+                    HANDLE thread = CreateThread(nullptr, 0, CopilotAskThread, args, 0, nullptr);
+                    if (!thread) {
+                        delete args;
+                        g_copilotAsking.store(false);
+                        std::lock_guard lock(g_stateMutex);
+                        g_state.copilot.status = L"Couldn't ask Copilot";
+                    } else {
+                        CloseHandle(thread);
+                    }
+                }
+            }
+            g_layoutDirty = true;
+            return true;
+        case VK_BACK:
+            if (ui.selectAll) {
+                ui.text.clear();
+                ui.caret = 0;
+                ui.selectAll = false;
+            } else if (ui.caret > 0) {
+                const size_t from = Utf16StepBack(ui.text, ui.caret);
+                ui.text.erase(from, ui.caret - from);
+                ui.caret = from;
+            }
+            ui.caretResetAt = NowSeconds();
+            g_layoutDirty = true;
+            return true;
+        case VK_LEFT:
+            ui.caret = ui.selectAll ? 0 : Utf16StepBack(ui.text, ui.caret);
+            ui.selectAll = false;
+            ui.caretResetAt = NowSeconds();
+            g_layoutDirty = true;
+            return true;
+        case VK_RIGHT:
+            ui.caret = ui.selectAll ? ui.text.size() : Utf16StepForward(ui.text, ui.caret);
+            ui.selectAll = false;
+            ui.caretResetAt = NowSeconds();
+            g_layoutDirty = true;
+            return true;
+        case 'A':
+            if (!ctrl) return false;
+            ui.selectAll = !ui.text.empty();
+            ui.caretResetAt = NowSeconds();
+            g_layoutDirty = true;
+            return true;
+        case 'V':
+            if (!ctrl) return false;
+            InsertCopilotText(TrimCopy(ReadClipboardText(hwnd)));
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool HandleCopilotChar(wchar_t ch) {
+    if (!g_copilotUi.composing) return false;
+    if (ch < 0x20 || ch == 0x7F) return true;
+    InsertCopilotText(std::wstring(1, ch));
+    g_copilotUi.selectAll = false;
+    return true;
+}
+
+struct CopilotWindowSearch {
+    HWND best = nullptr;
+    int bestScore = -1;
+};
+
+BOOL CALLBACK EnumCopilotWindows(HWND hwnd, LPARAM param) {
+    auto* search = reinterpret_cast<CopilotWindowSearch*>(param);
+    if (!IsWindowVisible(hwnd) || hwnd == g_hwnd) return TRUE;
+    wchar_t className[128] = {};
+    wchar_t title[256] = {};
+    GetClassNameW(hwnd, className, ARRAYSIZE(className));
+    if (wcscmp(className, kWindowClass) == 0) return TRUE;
+    GetWindowTextW(hwnd, title, ARRAYSIZE(title));
+
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hwnd, &pid);
+    wchar_t image[MAX_PATH] = {};
+    if (HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid)) {
+        DWORD length = ARRAYSIZE(image);
+        QueryFullProcessImageNameW(process, 0, image, &length);
+        CloseHandle(process);
+    }
+    const wchar_t* baseName = wcsrchr(image, L'\\');
+    const bool processMatch = ToLowerCopy(baseName ? baseName + 1 : image).find(L"copilot") != std::wstring::npos;
+    const bool titleMatch = ToLowerCopy(title).find(L"copilot") != std::wstring::npos;
+    if (!processMatch && !titleMatch) return TRUE;
+    int score = (processMatch ? 5 : 0) + (titleMatch ? 3 : 0);
+    if (GetWindow(hwnd, GW_OWNER) == nullptr) score += 2;
+    if (score > search->bestScore) {
+        search->bestScore = score;
+        search->best = hwnd;
+    }
+    return TRUE;
+}
+
+HWND FindCopilotWindow() {
+    CopilotWindowSearch search;
+    EnumWindows(EnumCopilotWindows, reinterpret_cast<LPARAM>(&search));
+    return search.best;
+}
+
+bool IsCopilotChromeText(const std::wstring& line) {
+    const std::wstring lower = ToLowerCopy(TrimCopy(line));
+    if (lower.empty() || lower.size() > 48) return false;
+    return lower == L"copilot" || lower == L"send" || lower == L"stop" ||
+           lower == L"new chat" || lower == L"ask me anything" ||
+           lower == L"ask copilot" || lower == L"message copilot" ||
+           lower == L"thinking" || lower == L"thinking..." ||
+           lower == L"generating" || lower == L"generating..." ||
+           lower == L"stop generating";
+}
+
+bool CollectUiNames(HWND hwnd, std::vector<std::wstring>* names) {
+    const HRESULT init = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    if (FAILED(init) && init != RPC_E_CHANGED_MODE) return false;
+    bool any = false;
+    IUIAutomation* automation = nullptr;
+    if (SUCCEEDED(CoCreateInstance(__uuidof(CUIAutomation), nullptr, CLSCTX_INPROC_SERVER,
+                                   __uuidof(IUIAutomation), reinterpret_cast<void**>(&automation))) &&
+        automation) {
+        IUIAutomationElement* root = nullptr;
+        if (SUCCEEDED(automation->ElementFromHandle(hwnd, &root)) && root) {
+            IUIAutomationCondition* condition = nullptr;
+            automation->CreateTrueCondition(&condition);
+            IUIAutomationElementArray* elements = nullptr;
+            if (condition &&
+                SUCCEEDED(root->FindAll(TreeScope_Descendants, condition, &elements)) && elements) {
+                int count = 0;
+                elements->get_Length(&count);
+                int start = 0;
+                if (count > 500) start = count - 500;
+                for (int i = start; i < count; ++i) {
+                    IUIAutomationElement* element = nullptr;
+                    if (FAILED(elements->GetElement(i, &element)) || !element) continue;
+                    BSTR name = nullptr;
+                    element->get_CurrentName(&name);
+                    if (name && name[0]) {
+                        names->push_back(name);
+                        any = true;
+                    }
+                    if (name) SysFreeString(name);
+                    element->Release();
+                }
+                elements->Release();
+            }
+            if (condition) condition->Release();
+            root->Release();
+        }
+        automation->Release();
+    }
+    if (SUCCEEDED(init)) CoUninitialize();
+    return any;
+}
+
+bool TrySetCopilotPrompt(HWND hwnd, const std::wstring& text) {
+    const HRESULT init = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    if (FAILED(init) && init != RPC_E_CHANGED_MODE) return false;
+    bool wrote = false;
+    IUIAutomation* automation = nullptr;
+    if (SUCCEEDED(CoCreateInstance(__uuidof(CUIAutomation), nullptr, CLSCTX_INPROC_SERVER,
+                                   __uuidof(IUIAutomation), reinterpret_cast<void**>(&automation))) &&
+        automation) {
+        IUIAutomationElement* root = nullptr;
+        if (SUCCEEDED(automation->ElementFromHandle(hwnd, &root)) && root) {
+            IUIAutomationCondition* condition = nullptr;
+            automation->CreateTrueCondition(&condition);
+            IUIAutomationElementArray* elements = nullptr;
+            if (condition &&
+                SUCCEEDED(root->FindAll(TreeScope_Descendants, condition, &elements)) && elements) {
+                int count = 0;
+                elements->get_Length(&count);
+                int start = 0;
+                if (count > 500) start = count - 500;
+                IUIAutomationElement* best = nullptr;
+                int bestScore = -1;
+                LONG bestBottom = LONG_MIN;
+                for (int i = start; i < count; ++i) {
+                    IUIAutomationElement* element = nullptr;
+                    if (FAILED(elements->GetElement(i, &element)) || !element) continue;
+                    CONTROLTYPEID type = 0;
+                    element->get_CurrentControlType(&type);
+                    if (type != UIA_EditControlTypeId && type != UIA_DocumentControlTypeId) {
+                        element->Release();
+                        continue;
+                    }
+                    BSTR name = nullptr;
+                    element->get_CurrentName(&name);
+                    const std::wstring lower = ToLowerCopy(name ? name : L"");
+                    if (name) SysFreeString(name);
+                    int score = 1;
+                    if (lower.find(L"ask") != std::wstring::npos ||
+                        lower.find(L"message") != std::wstring::npos ||
+                        lower.find(L"prompt") != std::wstring::npos ||
+                        lower.find(L"chat") != std::wstring::npos) {
+                        score += 5;
+                    }
+                    RECT bounds = {};
+                    element->get_CurrentBoundingRectangle(&bounds);
+                    if (score > bestScore || (score == bestScore && bounds.bottom > bestBottom)) {
+                        if (best) best->Release();
+                        best = element;
+                        bestScore = score;
+                        bestBottom = bounds.bottom;
+                    } else {
+                        element->Release();
+                    }
+                }
+                if (best && bestScore > 1) {
+                    IUnknown* pattern = nullptr;
+                    if (SUCCEEDED(best->GetCurrentPattern(UIA_ValuePatternId, &pattern)) && pattern) {
+                        IUIAutomationValuePattern* value = nullptr;
+                        if (SUCCEEDED(pattern->QueryInterface(__uuidof(IUIAutomationValuePattern),
+                                                             reinterpret_cast<void**>(&value))) &&
+                            value) {
+                            BSTR bstr = SysAllocString(text.c_str());
+                            if (bstr && SUCCEEDED(value->SetValue(bstr))) {
+                                wrote = true;
+                                best->SetFocus();
+                            }
+                            if (bstr) SysFreeString(bstr);
+                            value->Release();
+                        }
+                        pattern->Release();
+                    }
+                }
+                if (best) best->Release();
+                elements->Release();
+            }
+            if (condition) condition->Release();
+            root->Release();
+        }
+        automation->Release();
+    }
+    if (SUCCEEDED(init)) CoUninitialize();
+    return wrote;
+}
+
+std::wstring LatestCopilotReply(HWND hwnd, const std::wstring& prompt) {
+    std::vector<std::wstring> names;
+    if (!CollectUiNames(hwnd, &names)) return L"";
+    std::wstring best;
+    for (const std::wstring& raw : names) {
+        std::wstring line = TrimCopy(raw);
+        if (line.size() < 2 || line == prompt || IsCopilotChromeText(line)) continue;
+        if (!prompt.empty() && line.rfind(prompt, 0) == 0) {
+            line = TrimCopy(line.substr(prompt.size()));
+            if (line.size() < 2) continue;
+        } else if (!prompt.empty() && line.find(prompt) != std::wstring::npos &&
+                   line.size() < prompt.size() + 24) {
+            // "You" plus the question, not the answer.
+            continue;
+        }
+        best = std::move(line);
+    }
+    return best;
+}
+
+bool AskWindowsCopilot(const std::wstring& prompt, std::wstring* reply, std::wstring* error) {
+    HWND window = FindCopilotWindow();
+    if (!window) {
+        // Open the installed Copilot app. The question is typed below, so the
+        // launch itself does not also submit it.
+        ShellExecuteW(nullptr, L"open", L"ms-copilot:", nullptr, nullptr, SW_SHOWNORMAL);
+        for (int i = 0; i < 24 && !window; ++i) {
+            if (!SleepUnlessStopping(250)) return false;
+            window = FindCopilotWindow();
+        }
+    }
+    if (!window) {
+        if (error) *error = L"Copilot isn't available";
+        return false;
+    }
+
+    ForceWindowForeground(window);
+    if (!SleepUnlessStopping(280)) return false;
+    if (!TrySetCopilotPrompt(window, prompt)) {
+        if (!SleepUnlessStopping(500)) return false;
+        if (HWND retry = FindCopilotWindow()) window = retry;
+        ForceWindowForeground(window);
+        if (!TrySetCopilotPrompt(window, prompt)) {
+            TypeUnicodeText(prompt);
+            if (!SleepUnlessStopping(60)) return false;
+        }
+    }
+    TapVirtualKey(VK_RETURN);
+
+    std::wstring best;
+    int stable = 0;
+    for (int i = 0; i < 36; ++i) {
+        if (!SleepUnlessStopping(400)) return false;
+        HWND current = FindCopilotWindow();
+        if (!current) current = window;
+        std::wstring candidate = LatestCopilotReply(current, prompt);
+        if (!candidate.empty() && candidate == best) {
+            if (++stable >= 2 && best.size() >= 8) break;
+        } else if (!candidate.empty()) {
+            best = std::move(candidate);
+            stable = 0;
+        }
+    }
+    if (best.empty()) {
+        if (error) *error = L"No reply from Copilot";
+        return false;
+    }
+    if (best.size() > 500) {
+        best.resize(500);
+        best += L"...";
+    }
+    if (reply) *reply = std::move(best);
+    return true;
+}
+
+DWORD WINAPI CopilotAskThread(void* param) {
+    std::unique_ptr<CopilotAskArgs> args(static_cast<CopilotAskArgs*>(param));
+    std::wstring reply;
+    std::wstring error;
+    const bool ok = args && AskWindowsCopilot(args->text, &reply, &error);
+    {
+        std::lock_guard lock(g_stateMutex);
+        g_state.copilot.active = true;
+        if (ok) {
+            g_state.copilot.reply = std::move(reply);
+            g_state.copilot.status.clear();
+            g_state.copilot.expiresAt = NowSeconds() + 40.0;
+        } else {
+            g_state.copilot.status = error.empty() ? L"Couldn't ask Copilot" : error;
+            g_state.copilot.expiresAt = NowSeconds() + 12.0;
+        }
+    }
+    g_copilotAsking.store(false);
+    if (HWND hwnd = g_hwnd) {
+        PostMessageW(hwnd, WM_APP_COPILOT_DONE, ok ? 1 : 0, 0);
     }
     TriggerNudge();
     return 0;
@@ -13815,6 +14296,8 @@ void ShowContextMenu(HWND hwnd, POINT screenPoint) {
     AppendMenuW(menu, MF_STRING, 1, L"Dismiss");
     AppendMenuW(menu, MF_STRING | (g_settings.songRecognition ? 0 : (MF_GRAYED | MF_DISABLED)), 44,
                 L"Identify song");
+    AppendMenuW(menu, MF_STRING | (g_settings.copilot ? 0 : (MF_GRAYED | MF_DISABLED)), 45,
+                L"Ask Copilot");
 
     HMENU timerMenu = CreatePopupMenu();
     AppendMenuW(timerMenu, MF_STRING, 30, L"Start 25 min Focus");
@@ -14165,6 +14648,9 @@ void ShowContextMenu(HWND hwnd, POINT screenPoint) {
             break;
         case 44:
             StartSongRecognition(hwnd);
+            break;
+        case 45:
+            OpenCopilotCard(hwnd);
             break;
         case 42:
             PasteIntoFileTray(hwnd);
@@ -15465,6 +15951,9 @@ class Renderer {
                 break;
             case IslandKind::WhatsApp:
                 DrawWhatsApp(state, unscaledRect, now);
+                break;
+            case IslandKind::Copilot:
+                DrawCopilot(state, unscaledRect, now);
                 break;
             case IslandKind::Idle:
             default:
@@ -22229,6 +22718,103 @@ class Renderer {
         mutedBrush_->SetOpacity(0.75f);
     }
 
+    void DrawCopilot(const SharedState& state, D2D1_RECT_F rect, double now) {
+        if (rect.bottom - rect.top < 70.0f || rect.right - rect.left < 160.0f) return;
+
+        const float pad = 12.0f;
+        const float iconSize = 28.0f;
+        const D2D1_RECT_F badge = D2D1::RectF(rect.left + pad, rect.top + 10.0f,
+                                              rect.left + pad + iconSize, rect.top + 10.0f + iconSize);
+        ComPtr<ID2D1SolidColorBrush> plate;
+        target_->CreateSolidColorBrush(D2D1::ColorF(0.36f, 0.42f, 0.95f, 1.0f), &plate);
+        if (plate) {
+            target_->FillRoundedRectangle(D2D1::RoundedRect(badge, 8.0f, 8.0f), plate.Get());
+        }
+        if (boldTextFormat_) {
+            boldTextFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+            boldTextFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            textBrush_->SetOpacity(0.98f);
+            target_->DrawTextW(L"C", 1, boldTextFormat_.Get(), badge, textBrush_.Get(),
+                               D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            boldTextFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+            textBrush_->SetOpacity(0.96f);
+            const wchar_t* title = Loc(L"Copilot");
+            target_->DrawTextW(title, static_cast<UINT32>(wcslen(title)), boldTextFormat_.Get(),
+                               D2D1::RectF(badge.right + 10.0f, rect.top + 8.0f, rect.right - pad, rect.top + 28.0f),
+                               textBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            boldTextFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+            boldTextFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        }
+
+        std::wstring shown = state.copilot.reply;
+        const bool placeholder = shown.empty();
+        if (placeholder) {
+            if (!state.copilot.status.empty()) shown = state.copilot.status;
+            else shown = Loc(L"Ask Copilot");
+        }
+        if (smallTextFormat_ && !shown.empty()) {
+            smallTextFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+            smallTextFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+            smallTextFormat_->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
+            if (placeholder) mutedBrush_->SetOpacity(0.78f);
+            else textBrush_->SetOpacity(0.94f);
+            ID2D1Brush* brush = placeholder ? static_cast<ID2D1Brush*>(mutedBrush_.Get())
+                                            : static_cast<ID2D1Brush*>(textBrush_.Get());
+            target_->DrawTextW(shown.c_str(), static_cast<UINT32>(shown.size()), smallTextFormat_.Get(),
+                               D2D1::RectF(rect.left + pad, rect.top + 40.0f, rect.right - pad, rect.top + 96.0f),
+                               brush, D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            smallTextFormat_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+            smallTextFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+        }
+
+        const D2D1_RECT_F field = D2D1::RectF(rect.left + pad, rect.top + 100.0f,
+                                              rect.right - pad, rect.top + 132.0f);
+        DrawCard(field, 8.0f, g_copilotUi.composing);
+        std::wstring draft = g_copilotUi.text;
+        const bool draftPlaceholder = draft.empty();
+        if (draftPlaceholder) draft = g_copilotUi.composing ? L"" : Loc(L"Ask Copilot");
+        if (smallTextFormat_) {
+            smallTextFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            if (draftPlaceholder) mutedBrush_->SetOpacity(0.62f);
+            else textBrush_->SetOpacity(0.96f);
+            ID2D1Brush* brush = draftPlaceholder ? static_cast<ID2D1Brush*>(mutedBrush_.Get())
+                                                 : static_cast<ID2D1Brush*>(textBrush_.Get());
+            const D2D1_RECT_F textRect = D2D1::RectF(field.left + 10.0f, field.top,
+                                                     field.right - 10.0f, field.bottom);
+            if (!draft.empty()) {
+                target_->DrawTextW(draft.c_str(), static_cast<UINT32>(draft.size()),
+                                   smallTextFormat_.Get(), textRect, brush, D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            }
+            if (g_copilotUi.composing && !g_copilotUi.selectAll && dwriteFactory_) {
+                const bool caretOn = std::fmod(std::max(0.0, now - g_copilotUi.caretResetAt), 1.0) < 0.55;
+                if (caretOn) {
+                    std::wstring before = g_copilotUi.text.substr(0, g_copilotUi.caret);
+                    float caretX = textRect.left;
+                    if (!before.empty()) {
+                        ComPtr<IDWriteTextLayout> layout;
+                        if (SUCCEEDED(dwriteFactory_->CreateTextLayout(
+                                before.c_str(), static_cast<UINT32>(before.size()), smallTextFormat_.Get(),
+                                1000.0f, 30.0f, &layout)) && layout) {
+                            DWRITE_TEXT_METRICS metrics = {};
+                            layout->GetMetrics(&metrics);
+                            caretX += metrics.widthIncludingTrailingWhitespace;
+                        }
+                    }
+                    caretX = std::min(caretX, textRect.right - 2.0f);
+                    ComPtr<ID2D1SolidColorBrush> caret;
+                    target_->CreateSolidColorBrush(material_.textPrimary, &caret);
+                    if (caret) {
+                        target_->DrawLine(D2D1::Point2F(caretX, field.top + 8.0f),
+                                          D2D1::Point2F(caretX, field.bottom - 8.0f), caret.Get(), 1.25f);
+                    }
+                }
+            }
+            smallTextFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+        }
+        textBrush_->SetOpacity(0.96f);
+        mutedBrush_->SetOpacity(0.75f);
+    }
+
     void DrawNotification(const SharedState& state, D2D1_RECT_F rect) {
         if (rect.bottom - rect.top < 48.0f || rect.right - rect.left < 120.0f) return;
         const double now = NowSeconds();
@@ -23938,6 +24524,10 @@ Activity ActivityForKind(IslandKind kind, const Settings& settings, const Shared
             activity.width = 380.0f;
             activity.height = 112.0f;
             break;
+        case IslandKind::Copilot:
+            activity.width = 380.0f;
+            activity.height = 148.0f;
+            break;
         case IslandKind::Idle:
         default:
             if (settings.autoHideIdleSeconds == -1 && !state.system.micActive && !state.system.cameraActive) {
@@ -23975,6 +24565,11 @@ std::vector<IslandKind> ChooseActivities(const SharedState& state, const Setting
     if (settings.whatsApp && state.whatsApp.active &&
         (g_waUi.composing || now < state.whatsApp.expiresAt)) {
         activities.push_back(IslandKind::WhatsApp);
+    }
+
+    if (settings.copilot && state.copilot.active &&
+        (g_copilotUi.composing || g_copilotAsking.load() || now < state.copilot.expiresAt)) {
+        activities.push_back(IslandKind::Copilot);
     }
 
     if (state.clipboard.active && now < state.clipboard.expiresAt) {
@@ -25358,11 +25953,13 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         case WM_KEYDOWN:
             if (HandleLookupKeyDown(hwnd, wParam)) return 0;
             if (HandleWhatsAppKeyDown(hwnd, wParam)) return 0;
+            if (HandleCopilotKeyDown(hwnd, wParam)) return 0;
             break;
 
         case WM_CHAR:
             if (HandleLookupChar(static_cast<wchar_t>(wParam))) return 0;
             if (HandleWhatsAppChar(static_cast<wchar_t>(wParam))) return 0;
+            if (HandleCopilotChar(static_cast<wchar_t>(wParam))) return 0;
             break;
 
         case WM_APP_WHATSAPP_DONE:
@@ -25375,6 +25972,15 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             g_layoutDirty = true;
             return 0;
 
+        case WM_APP_COPILOT_DONE:
+            if (wParam && !g_copilotUi.composing) {
+                g_copilotUi.text.clear();
+                g_copilotUi.caret = 0;
+                g_copilotUi.selectAll = false;
+            }
+            g_layoutDirty = true;
+            return 0;
+
         case WM_KILLFOCUS:
             // Clicked another window / Alt+Tab / Win key: the search is over.
             if (g_lookupUi.open) {
@@ -25382,6 +25988,9 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             }
             if (g_waUi.composing && !g_waSending.load()) {
                 EndWhatsAppSession(hwnd);
+            }
+            if (g_copilotUi.composing && !g_copilotAsking.load()) {
+                EndCopilotSession(hwnd);
             }
             return 0;
 
@@ -25398,7 +26007,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     SetCursor(LoadCursorW(nullptr, LookupCursorAt(cp.x, cp.y)));
                     return TRUE;
                 }
-                if (g_waUi.composing) {
+                if (g_waUi.composing || g_copilotUi.composing) {
                     SetCursor(LoadCursorW(nullptr, IDC_IBEAM));
                     return TRUE;
                 }
@@ -25756,6 +26365,11 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
                 if (!kinds.empty() && kinds[0] == IslandKind::WhatsApp) {
                     BeginWhatsAppSession(hwnd);
+                    TriggerNudge();
+                    return 0;
+                }
+                if (!kinds.empty() && kinds[0] == IslandKind::Copilot) {
+                    BeginCopilotSession(hwnd);
                     TriggerNudge();
                     return 0;
                 }
@@ -26472,6 +27086,14 @@ DWORD WINAPI RenderThreadProc(void*) {
                 }
                 snapshot.whatsApp = g_state.whatsApp;
             }
+            if (g_state.copilot.active) {
+                if (g_copilotUi.composing || g_copilotAsking.load()) {
+                    g_state.copilot.expiresAt = std::max(g_state.copilot.expiresAt, now + 20.0);
+                } else if (now >= g_state.copilot.expiresAt) {
+                    g_state.copilot.active = false;
+                }
+                snapshot.copilot = g_state.copilot;
+            }
             if (g_state.volume.active && now >= g_state.volume.expiresAt) {
                 g_state.volume.active = false;
                 snapshot.volume.active = false;
@@ -26505,6 +27127,9 @@ DWORD WINAPI RenderThreadProc(void*) {
         }
         if (g_waUi.composing && (!g_settings.whatsApp || !snapshot.whatsApp.active)) {
             EndWhatsAppSession(hwnd);
+        }
+        if (g_copilotUi.composing && (!g_settings.copilot || !snapshot.copilot.active)) {
+            EndCopilotSession(hwnd);
         }
 
         const std::vector<IslandKind> kinds = ChooseActivities(snapshot, g_settings, now);
@@ -26611,6 +27236,7 @@ DWORD WINAPI RenderThreadProc(void*) {
                                  primary.kind == IslandKind::Lookup ||
                                  primary.kind == IslandKind::SongId ||
                                  primary.kind == IslandKind::WhatsApp ||
+                                 primary.kind == IslandKind::Copilot ||
                                  recentTrackChange);
 
         const bool unhideGraceActive = (now < g_hotkeyUnhideUntil.load());
@@ -26771,6 +27397,10 @@ DWORD WINAPI RenderThreadProc(void*) {
         }
 
         if (primary.kind == IslandKind::WhatsApp) {
+            secondary.reset();
+        }
+
+        if (primary.kind == IslandKind::Copilot) {
             secondary.reset();
         }
 

@@ -4,6 +4,17 @@ All notable changes, enhancements, and bug fixes for **Dynamic Island for Window
 
 ---
 
+## [1.6.0] — 2026-11-12
+
+### ✨ New Features
+
+#### ✨ Copilot
+A small assistant card on the island talks to the Copilot app already installed on Windows 11:
+- Turn it on under **Modules → Copilot** (off by default), then right-click the island and choose **Ask Copilot**.
+- Type a message and press Enter. The question is sent to the Copilot window, and the reply is shown on the card. Escape dismisses the card.
+
+---
+
 ## [1.5.0] — 2026-11-12
 
 ### ✨ New Features
