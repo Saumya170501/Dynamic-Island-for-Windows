@@ -6196,6 +6196,27 @@ bool IsWhatsAppName(const std::wstring& name) {
     return ToLowerCopy(name).find(L"whatsapp") != std::wstring::npos;
 }
 
+// A toast line that is the app itself ("WhatsApp", "WhatsApp Desktop"), not a
+// message that merely mentions it. Letters only, so "2 unread messages" does not match.
+bool IsWhatsAppAppLine(const std::wstring& line) {
+    std::wstring letters;
+    letters.reserve(line.size());
+    for (wchar_t ch : line) {
+        if (iswalpha(ch)) letters.push_back(static_cast<wchar_t>(towlower(ch)));
+    }
+    if (letters.rfind(L"whatsapp", 0) != 0) return false;
+    const std::wstring rest = letters.substr(8);
+    return rest.empty() || rest == L"desktop" || rest == L"messenger";
+}
+
+// The corner banner adds a status line such as "2 unread messages" next to the
+// sender and the actual text. That line is not the reply target.
+bool IsWhatsAppUnreadLine(const std::wstring& line) {
+    const std::wstring lower = ToLowerCopy(line);
+    return lower.find(L"unread") != std::wstring::npos ||
+           lower.find(L"new message") != std::wstring::npos;
+}
+
 std::wstring TrimCopy(std::wstring value) {
     const size_t begin = value.find_first_not_of(L" \t\r\n");
     if (begin == std::wstring::npos) return L"";
@@ -6241,6 +6262,41 @@ void PublishWhatsAppMessage(std::wstring chat, std::wstring body, PixelsRef icon
         card.expiresAt = NowSeconds() + 28.0;
     }
     TriggerNudge();
+}
+
+// Toast lines in visual order. The app name and the unread summary are skipped.
+// Returns false when there is nothing to show, so the caller can keep the generic card.
+bool PublishWhatsAppFromLines(const std::vector<std::wstring>& lines, PixelsRef icon) {
+    std::wstring chat;
+    std::wstring body;
+    std::wstring summary;
+    bool sawApp = false;
+    for (const std::wstring& raw : lines) {
+        const std::wstring line = TrimCopy(raw);
+        if (line.empty()) continue;
+        if (IsWhatsAppAppLine(line)) {
+            sawApp = true;
+            continue;
+        }
+        if (IsWhatsAppUnreadLine(line)) {
+            if (summary.empty()) summary = line;
+            continue;
+        }
+        if (chat.empty()) chat = line;
+        else if (body.empty()) body = line;
+        else body += L" " + line;
+    }
+    // One content line under the app name is the message. The sender was not in the text.
+    if (sawApp && body.empty() && !chat.empty()) {
+        body = std::move(chat);
+        chat.clear();
+    }
+    if (chat.empty() && body.empty()) {
+        if (summary.empty()) return false;
+        body = std::move(summary);
+    }
+    PublishWhatsAppMessage(std::move(chat), std::move(body), std::move(icon));
+    return true;
 }
 
 size_t Utf16StepBack(const std::wstring& text, size_t index) {
@@ -7461,22 +7517,15 @@ DWORD WINAPI NotificationThreadProc(void*) {
                             } catch (...) {
                             }
                             if (g_settings.whatsApp && (IsWhatsAppName(snapshot.app) || IsWhatsAppName(aumid))) {
-                                std::wstring chat = snapshot.title;
-                                std::wstring message = snapshot.body;
-                                // A title that is only the app name is not a chat. When the
-                                // toast has a third line, the second line is the sender.
-                                if (IsWhatsAppName(chat)) {
-                                    if (!thirdLine.empty()) {
-                                        chat = message;
-                                        message = thirdLine;
-                                    } else {
-                                        chat.clear();
-                                    }
-                                } else if (!thirdLine.empty() && message.empty()) {
-                                    message = thirdLine;
+                                std::vector<std::wstring> lines;
+                                if (!snapshot.title.empty()) lines.push_back(std::move(snapshot.title));
+                                if (!snapshot.body.empty()) lines.push_back(std::move(snapshot.body));
+                                if (!thirdLine.empty()) lines.push_back(std::move(thirdLine));
+                                // An empty binding is not "handled". The shell banner path
+                                // still has the sender and the message on screen.
+                                if (PublishWhatsAppFromLines(lines, std::move(snapshot.icon))) {
+                                    continue;
                                 }
-                                PublishWhatsAppMessage(std::move(chat), std::move(message), std::move(snapshot.icon));
-                                continue;
                             }
 
                             if (snapshot.title.empty()) {
@@ -10984,38 +11033,36 @@ void CaptureShellNotification(HWND hwnd) {
         return;
     }
 
-    // The toast listener publishes the reply card with the real sender and body.
-    // A shell toast whose title is just "WhatsApp" would otherwise flash a generic card.
-    if (g_settings.whatsApp && IsWhatsAppName(title)) {
-#if !DYNAMIC_ISLAND_HAS_USER_NOTIFICATION_LISTENER
-        PublishWhatsAppMessage(title, L"", GetWindowIconPixels(hwnd, 64));
-#endif
-        return;
-    }
+    // A window title of "WhatsApp" has no sender or message yet. Skip the generic
+    // flash, but still read the banner text below. Returning here dropped toasts
+    // the listener never listed, including "Krish 152" / "Hi".
+    const std::wstring toastTitle(title);
+    const bool titleIsWhatsApp = g_settings.whatsApp && IsWhatsAppName(toastTitle);
+    if (!titleIsWhatsApp) {
+        NotificationSnapshot notification;
+        notification.active = true;
+        notification.app = L"Notification";
+        notification.title = title;
+        notification.expiresAt = NowSeconds() + 4.0;
+        // Fetch a 64px icon to ensure crisp rendering inside the pill
+        notification.icon = GetWindowIconPixels(hwnd, 64);
 
-    NotificationSnapshot notification;
-    notification.active = true;
-    notification.app = L"Notification";
-    notification.title = title;
-    notification.expiresAt = NowSeconds() + 4.0;
-    // Fetch a 64px icon to ensure crisp rendering inside the pill
-    notification.icon = GetWindowIconPixels(hwnd, 64);
+        if (notification.title.size() > 96) {
+            notification.body = notification.title.substr(64);
+            notification.title.resize(64);
+            notification.title += L"...";
+        }
 
-    if (notification.title.size() > 96) {
-        notification.body = notification.title.substr(64);
-        notification.title.resize(64);
-        notification.title += L"...";
+        {
+            std::lock_guard lock(g_stateMutex);
+            g_state.notification = std::move(notification);
+        }
+        TriggerNudge();
     }
-
-    {
-        std::lock_guard lock(g_stateMutex);
-        g_state.notification = std::move(notification);
-    }
-    TriggerNudge();
 
     // Spawn a background thread to extract the full rich text body of the toast using UI Automation.
     // Modern Windows Toasts often only provide the App Name via GetWindowTextW, leaving the body hidden in the XAML tree.
-    std::thread([hwnd]() {
+    std::thread([hwnd, toastTitle]() {
         try {
             Sleep(400); // Give the heavy UWP XAML tree enough time to fully construct the text nodes
             if (!IsWindow(hwnd)) return;
@@ -11040,6 +11087,7 @@ void CaptureShellNotification(HWND hwnd) {
                             elements->get_Length(&count);
                             std::wstring appName;
                             std::wstring fullText;
+                            std::vector<std::wstring> lines;
                             for (int i = 0; i < count; ++i) {
                                 IUIAutomationElement* el = nullptr;
                                 if (SUCCEEDED(elements->GetElement(i, &el)) && el) {
@@ -11049,6 +11097,7 @@ void CaptureShellNotification(HWND hwnd) {
                                         std::wstring chunk = name;
                                         // Skip generic screen-reader labels often found in toasts
                                         if (chunk != L"Notification" && chunk != L"New notification") {
+                                            lines.push_back(chunk);
                                             if (appName.empty()) {
                                                 appName = chunk;
                                             } else {
@@ -11063,6 +11112,33 @@ void CaptureShellNotification(HWND hwnd) {
                             }
                             elements->Release();
 
+                            bool whatsAppToast = g_settings.whatsApp && IsWhatsAppName(toastTitle);
+                            if (!whatsAppToast && g_settings.whatsApp) {
+                                for (const std::wstring& line : lines) {
+                                    if (IsWhatsAppAppLine(line)) {
+                                        whatsAppToast = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            if (whatsAppToast) {
+                                std::wstring iconKey = L"WhatsApp";
+                                for (const std::wstring& line : lines) {
+                                    if (IsWhatsAppAppLine(line)) {
+                                        iconKey = line;
+                                        break;
+                                    }
+                                }
+                                if (PublishWhatsAppFromLines(lines, FindAppIconByName(iconKey, 64))) {
+                                    std::lock_guard lock(g_stateMutex);
+                                    g_state.notification.active = false;
+                                    whatsAppToast = true;
+                                } else {
+                                    whatsAppToast = false;
+                                }
+                            }
+
+                            if (!whatsAppToast) {
                             if (fullText.empty() && !appName.empty()) {
                                 fullText = appName;
                                 appName = L"Notification";
@@ -11073,14 +11149,7 @@ void CaptureShellNotification(HWND hwnd) {
                                 if (!appName.empty() && appName != L"Notification") {
                                     resolvedIcon = FindAppIconByName(appName, 64);
                                 }
-                                if (g_settings.whatsApp && IsWhatsAppName(appName)) {
-#if !DYNAMIC_ISLAND_HAS_USER_NOTIFICATION_LISTENER
-                                    const std::wstring chat = L"";
-                                    PublishWhatsAppMessage(chat, fullText, resolvedIcon);
-#endif
-                                    std::lock_guard lock(g_stateMutex);
-                                    g_state.notification.active = false;
-                                } else {
+                                {
                                     std::lock_guard lock(g_stateMutex);
                                     if (g_state.notification.active) {
                                         if (!appName.empty()) {
@@ -11092,6 +11161,7 @@ void CaptureShellNotification(HWND hwnd) {
                                         g_state.notification.title = fullText;
                                     }
                                 }
+                            }
                             }
                         }
                         if (cond) cond->Release();
