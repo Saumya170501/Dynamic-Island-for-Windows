@@ -2,7 +2,7 @@
 // @id              dynamic-island-for-windows
 // @name            Dynamic Island for Windows
 // @description     A living, breathing pill overlay inspired by iPhone's Dynamic Island. Reacts to media, downloads, clipboard, battery, and more.
-// @version         1.4.0
+// @version         1.5.0
 // @author          Himanshu
 // @github          https://github.com/devcode90
 // @include         windhawk.exe
@@ -54,6 +54,8 @@ The Dynamic Island intelligently expands to display context-aware dashboards. Yo
 - **File Tray:** Drag any file onto the island to park it on a shelf, then click to open it. You can now drag files back out into any folder or app, and remove them one by one. The island itself only references files, it never copies or moves them.
 - **Lyrics on the Collapsed Island:** Switch on "Show lyrics on collapsed island" from the right-click menu and the pill widens to show the current line as it's sung, sliding in with every new line. When there are no synced lyrics it shows the song title instead.
 - **Song Recognition (Shazam):** Identify any track playing on your desktop in seconds — the island listens to your system audio and displays the song title, artist, and cover art with zero API keys required.
+- **WhatsApp replies:** An incoming WhatsApp Desktop message opens on the island. Click it, type a reply, and press Enter to send it through the WhatsApp window.
+- **MetaTrader 5 trades:** Hover the island and scroll to the Trades card to see open positions with live profit. The close button on a row closes that position.
 - **Quick Lookup:** Once enabled under Modules, press **Ctrl+Alt+Space** to open a search box right on the island. Type a word or phrase, press Enter, and get a definition or a short summary. Your clipboard text and recent searches are one click away.
 - **Lyrics Sync Offset:** Nudge lyric timing in milliseconds when lyrics feel early or late, with a separate value for Bluetooth audio output that is picked automatically from your default audio device. Set it in Mod Settings or from the right-click menu's "Lyrics sync" submenu.
 - **Typography & Clock Control:** Scale all island text independently of the island's size, choose 12- or 24-hour time, show seconds, and set a custom date pattern — including CJK forms like `yyyy年MM月dd日`.
@@ -104,6 +106,7 @@ The Dynamic Island intelligently expands to display context-aware dashboards. Yo
 - **[thevioletto @GitHub](https://github.com/thevioletto)**: Added custom font support, Windows Do Not Disturb integration and status alerts, improved album art color sampling, reorganized settings, and addressed various UI/media edge cases.
 - **[David Ravelo (DavidRaveloU) @GitHub](https://github.com/DavidRaveloU)**: Added selectable audio spectrum styles with a live frequency analyzer, new progress bar styles, optional track-change animations for the title, cover flip, playback controls and pill cover spin, an optional clock in the collapsed media pill, and a brightness slider flyout.
 - **[Retr0dev-jpg @GitHub](https://github.com/Retr0dev-jpg)**: Event-driven volume flyout with animated bar and default device switching, plus a calendar that follows the Windows locale for weekday initials and first day of the week (with a Monday/Sunday override).
+- **WhatsApp replies and MetaTrader 5 trades**: Incoming WhatsApp Desktop messages can be answered from the island, and a Trades card lists open MetaTrader 5 positions with live profit and a per-row close button.
 
 ### 🤝 Contributing
 We love community contributions! To ensure high-quality updates, please follow these rules:
@@ -565,6 +568,18 @@ We love community contributions! To ensure high-quality updates, please follow t
       - '5': 5 seconds
       - '8': 8 seconds (default)
       - '12': 12 seconds (most reliable)
+  - WhatsApp: false
+    $name: WhatsApp replies
+    $description: Shows an incoming WhatsApp Desktop toast on the island with a reply box. Click the card, type, and press Enter to send the reply through the WhatsApp window. WhatsApp Desktop must be running, and Windows must allow apps to read notifications (the same switch as the notification module). Off by default.
+  - Mt5: false
+    $name: MetaTrader 5 trades
+    $description: Adds a Trades card to the mouse-wheel scroll loop. It lists open positions with live profit and a close button on each row. The first time this is on, the mod writes DynamicIslandBridge.mq5 into the terminal's MQL5\Experts folder and tries to compile it. Attach that expert to any chart and turn on Algo Trading. Off by default.
+  - Mt5Account: ""
+    $name: MetaTrader 5 account
+    $description: Account login to follow, digits only (for example 12345678). Leave blank to use the first terminal whose bridge file is updating.
+  - Mt5DataPath: ""
+    $name: MetaTrader 5 data folder
+    $description: Optional. The folder MetaTrader opens with File, Open Data Folder, or the full path of dynamic_island_mt5.txt. Leave blank to search %AppData%\MetaQuotes\Terminal.
   $name: Modules & Features
 - Shortcuts:
   - HideShowHotkeyEnabled: true
@@ -654,6 +669,7 @@ We love community contributions! To ensure high-quality updates, please follow t
 #include <cmath>
 #include <cstdint>
 #include <cwchar>
+#include <cstdio>
 #include <cstring>
 #include <memory>
 #include <mutex>
@@ -706,6 +722,7 @@ constexpr UINT WM_APP_MOUSE_WAKE = WM_APP + 0x446;
 // thread, so hotkey and backdrop changes are posted across and applied there.
 constexpr UINT WM_APP_APPLY_HOTKEY = WM_APP + 0x447;
 constexpr UINT WM_APP_APPLY_BACKDROP = WM_APP + 0x448;
+constexpr UINT WM_APP_WHATSAPP_DONE = WM_APP + 0x449;
 constexpr int ID_HIDE_SHOW_HOTKEY = 1;
 constexpr int ID_LOOKUP_HOTKEY = 2;
 constexpr int ID_SONGID_HOTKEY = 3;
@@ -854,6 +871,24 @@ namespace FileTrayLayout {
         return kPadX + kClearBtnSize + kPasteBtnGap + kClearBtnSize + kPagerGapToPaste;
     }
     constexpr float PagerWidth() { return kPagerBtnSize * 2.0f + kPagerLabelW; }
+
+    constexpr int VisibleRowCapacity(float contentHeight) {
+        const float span = contentHeight - kListBottomInset - kListTop + kRowGap;
+        const int capacity = static_cast<int>(span / (kRowHeight + kRowGap));
+        return capacity < 1 ? 1 : capacity;
+    }
+}
+
+// Trades card. Same coordinate space as FileTrayLayout (content space, scale
+// already divided out by MediaContentFromClient).
+namespace Mt5Layout {
+    constexpr float kPadX = 26.0f;
+    constexpr float kListTop = 52.0f;
+    constexpr float kListBottomInset = 14.0f;
+    constexpr float kRowHeight = 28.0f;
+    constexpr float kRowGap = 4.0f;
+    constexpr float kCloseSize = 18.0f;
+    constexpr float kCloseMargin = 6.0f;
 
     constexpr int VisibleRowCapacity(float contentHeight) {
         const float span = contentHeight - kListBottomInset - kListTop + kRowGap;
@@ -1041,6 +1076,7 @@ enum class IslandKind {
     Split,
     Lookup,
     SongId,
+    WhatsApp,
 };
 
 enum class BluetoothDeviceCategory {
@@ -1262,6 +1298,13 @@ struct Settings {
     int songIdSeconds = 8;
     UINT songIdModifiers = MOD_CONTROL | MOD_ALT | MOD_NOREPEAT;
     UINT songIdVk = 'R';
+
+    // WhatsApp replies and the MetaTrader 5 trades card. Both default off:
+    // one sends a chat message, the other can close a live position.
+    bool whatsApp = false;
+    bool mt5 = false;
+    std::wstring mt5Account;
+    std::wstring mt5DataPath;
     bool bluetoothIndicator = true;
     bool bluetoothShowBattery = true;
     D2D1_COLOR_F privacyDotsMicHex = D2D1::ColorF(1.0f, 0.584f, 0.0f, 1.0f); // #FF9500
@@ -1673,6 +1716,19 @@ struct LookupUiState {
 };
 LookupUiState g_lookupUi;
 
+// Reply box for the WhatsApp card. Window thread only, same rule as g_lookupUi.
+struct WhatsAppUiState {
+    bool composing = false;
+    std::wstring text;
+    size_t caret = 0;
+    bool selectAll = false;
+    uint64_t forId = 0;
+    double caretResetAt = 0.0;
+    HWND prevForeground = nullptr;
+};
+WhatsAppUiState g_waUi;
+std::atomic<bool> g_waSending{false};
+
 enum class SongIdStatus {
     Listening,
     Matching,
@@ -1697,6 +1753,50 @@ struct SongIdSnapshot {
     PixelsRef cover;
 };
 
+// Incoming WhatsApp Desktop toast, plus the reply the island is sending.
+struct WhatsAppSnapshot {
+    bool active = false;
+    uint64_t id = 0;             // bumps when the chat changes, so a draft is not sent to the wrong person
+    std::wstring chat;
+    std::wstring body;
+    std::wstring status;         // "Sending...", "Sent", or a short failure
+    PixelsRef icon;
+    double expiresAt = 0.0;
+};
+
+enum class Mt5Link {
+    NoTerminal,        // nothing under AppData and no configured folder
+    NeedBridge,        // terminal found, bridge file not updating
+    AccountMismatch,   // bridge file is for a different login
+    Live,
+    Stale,             // file exists but the expert has stopped writing
+};
+
+struct Mt5Position {
+    unsigned long long ticket = 0;
+    std::wstring symbol;
+    bool buy = true;
+    double volume = 0.0;
+    double priceOpen = 0.0;
+    double priceCurrent = 0.0;
+    double profit = 0.0;         // floating profit + swap, account currency
+    bool closing = false;
+};
+
+// Open MetaTrader 5 positions, polled from the bridge file.
+struct Mt5Snapshot {
+    Mt5Link link = Mt5Link::NoTerminal;
+    std::wstring filesDir;       // MQL5\Files, where close commands are written
+    std::wstring login;
+    std::wstring server;
+    std::wstring currency;
+    std::wstring detail;
+    double balance = 0.0;
+    double equity = 0.0;
+    int64_t updatedUnix = 0;
+    std::vector<Mt5Position> positions;
+};
+
 struct SharedState {
     MediaSnapshot media;
     SongIdSnapshot songId;
@@ -1717,6 +1817,8 @@ struct SharedState {
     LyricsSnapshot lyrics;
     LookupSnapshot lookup;
     std::vector<LookupRecent> lookupRecent;  // newest first, guarded by g_stateMutex
+    WhatsAppSnapshot whatsApp;
+    Mt5Snapshot mt5;
     std::array<float, 48> waveform{};
     size_t waveformWrite = 0;
     std::array<float, kSpectrumBands> bands{};  // smoothed 0..1 magnitude per band (low -> high)
@@ -1789,6 +1891,7 @@ HANDLE g_weatherThread = nullptr;
 HANDLE g_lyricsThread = nullptr;
 HANDLE g_notificationThread = nullptr;
 HANDLE g_bluetoothThread = nullptr;
+HANDLE g_mt5Thread = nullptr;
 std::atomic<bool> g_running = false;
 std::atomic<int> g_idleTab = 0;
 // True while a media pill exists, i.e. while the Lyrics tab can be shown.
@@ -1824,6 +1927,9 @@ std::atomic<int> g_hoveredSourceSlot{-1};
 std::atomic<int> g_pressedSourceSlot{-1};
 std::atomic<int> g_hoveredFileTrayRow = -1;  // row index under the cursor on the File Tray card
 std::atomic<int> g_hoveredFileTrayAction = -1;  // -2 = bin, -3 = paste, -4 = previous page, -5 = next page, >=0 = cut button of that row
+std::atomic<int> g_hoveredMt5Row{-1};           // visible row under the cursor on the Trades card
+std::atomic<bool> g_hoveredMt5Close{false};     // cursor is on that row's close button
+std::atomic<int> g_mt5Scroll{0};                // first visible position row
 std::atomic<int> g_fileTrayScroll{0};           // index of the first visible row (newest-first order)
 std::atomic<bool> g_fileTrayPagerOn{true};      // Modules.FileTrayNavigation: pager shown
 std::atomic<bool> g_fileTrayWheelOn{false};     // Modules.FileTrayNavigation: wheel scroll + scrollbar
@@ -2031,6 +2137,7 @@ int ActiveTabCount(const Settings& settings) {
     if (settings.hardwareMonitorModule) ++count;
     if (settings.fileTrayModule) ++count;
     if (settings.lyrics && g_lyricsTabAvailable.load(std::memory_order_relaxed)) ++count;
+    if (settings.mt5) ++count;
     return count;
 }
 
@@ -2066,6 +2173,14 @@ int FileTrayTabIndex(const Settings& settings) {
     }
     return 2 + (settings.weather ? 1 : 0) + (settings.hardwareMonitorModule ? 1 : 0) +
            MediaTabIndex(settings);
+}
+
+// Trades is always the last card, in both the idle and the media scroll loops.
+int Mt5TabIndex(const Settings& settings) {
+    if (!settings.mt5) {
+        return -1;
+    }
+    return ActiveTabCount(settings) - 1;
 }
 
 // Moves the dashboard one tab (+1 = next, -1 = previous). Clamped at both ends:
@@ -2542,6 +2657,46 @@ bool FileTrayRemoveHitTest(const MediaContentPoint& pt, int row) {
     const float centerY = FileTrayLayout::kListTop +
                           static_cast<float>(row) * (FileTrayLayout::kRowHeight + FileTrayLayout::kRowGap) +
                           FileTrayLayout::kRowHeight * 0.5f;
+    return std::fabs(pt.x - centerX) <= half && std::fabs(pt.y - centerY) <= half;
+}
+
+int Mt5RowAtContentPoint(const MediaContentPoint& pt, int itemCount) {
+    if (!pt.valid || itemCount <= 0 || pt.height <= MediaLayout::kExpandedMinHeight) {
+        return -1;
+    }
+    if (pt.x < Mt5Layout::kPadX || pt.x > pt.width - Mt5Layout::kPadX) {
+        return -1;
+    }
+    const float listBottom = pt.height - Mt5Layout::kListBottomInset;
+    if (pt.y < Mt5Layout::kListTop || pt.y > listBottom) {
+        return -1;
+    }
+    const float stride = Mt5Layout::kRowHeight + Mt5Layout::kRowGap;
+    const int index = static_cast<int>((pt.y - Mt5Layout::kListTop) / stride);
+    const float rowTop = Mt5Layout::kListTop + index * stride;
+    if (pt.y > rowTop + Mt5Layout::kRowHeight) {
+        return -1;
+    }
+    const int capacity = Mt5Layout::VisibleRowCapacity(pt.height);
+    const int offset = g_mt5Scroll.load(std::memory_order_relaxed);
+    const int remaining = itemCount - (offset > 0 ? offset : 0);
+    if (index < 0 || index >= capacity || index >= remaining) {
+        return -1;
+    }
+    return index;
+}
+
+bool Mt5CloseHitTest(const MediaContentPoint& pt, int row) {
+    if (!pt.valid || row < 0 || pt.height <= MediaLayout::kExpandedMinHeight) {
+        return false;
+    }
+    constexpr float kSlop = 3.0f;
+    const float half = Mt5Layout::kCloseSize * 0.5f + kSlop;
+    const float centerX = pt.width - Mt5Layout::kPadX - Mt5Layout::kCloseMargin -
+                          Mt5Layout::kCloseSize * 0.5f;
+    const float centerY = Mt5Layout::kListTop +
+                          static_cast<float>(row) * (Mt5Layout::kRowHeight + Mt5Layout::kRowGap) +
+                          Mt5Layout::kRowHeight * 0.5f;
     return std::fabs(pt.x - centerX) <= half && std::fabs(pt.y - centerY) <= half;
 }
 
@@ -3241,6 +3396,36 @@ void LoadSettings() {
     }
     next.songIdModifiers = ParseHotkeyModifiers(GetStringSettingCopy(L"Shortcuts.SongIdModifiers"));
     next.songIdVk = ParseHotkeyKeyName(GetStringSettingCopy(L"Shortcuts.SongIdKey"), 'R');
+
+    next.whatsApp = Wh_GetIntSetting(L"Modules.WhatsApp") != 0;
+    next.mt5 = Wh_GetIntSetting(L"Modules.Mt5") != 0;
+    next.mt5Account = GetStringSettingCopy(L"Modules.Mt5Account");
+    next.mt5DataPath = GetStringSettingCopy(L"Modules.Mt5DataPath");
+    {
+        const size_t a = next.mt5Account.find_first_not_of(L" \t\r\n\"'");
+        if (a == std::wstring::npos) {
+            next.mt5Account.clear();
+        } else {
+            next.mt5Account = next.mt5Account.substr(a, next.mt5Account.find_last_not_of(L" \t\r\n\"'") - a + 1);
+        }
+        const size_t p = next.mt5DataPath.find_first_not_of(L" \t\r\n\"'");
+        if (p == std::wstring::npos) {
+            next.mt5DataPath.clear();
+        } else {
+            next.mt5DataPath = next.mt5DataPath.substr(p, next.mt5DataPath.find_last_not_of(L" \t\r\n\"'") - p + 1);
+        }
+    }
+    if (!next.whatsApp || !next.mt5) {
+        std::lock_guard lock(g_stateMutex);
+        if (!next.whatsApp) {
+            g_state.whatsApp.active = false;
+            g_state.whatsApp.status.clear();
+        }
+        if (!next.mt5) {
+            g_state.mt5 = Mt5Snapshot{};
+            g_mt5Scroll.store(0);
+        }
+    }
 
     next.bluetoothIndicator = Wh_GetIntSetting(L"Modules.BluetoothIndicator") != 0;
     next.bluetoothShowBattery = Wh_GetIntSetting(L"Modules.BluetoothShowBattery") != 0;
@@ -5990,6 +6175,1142 @@ void UnsubscribeDndNotification() {
     g_wnfDndSubscription = nullptr;
 }
 
+// ── WhatsApp replies and MetaTrader 5 trades ────────────────────────────────
+// Both features are off until the user enables them. WhatsApp rides the existing
+// toast listener and types the reply into WhatsApp Desktop. MetaTrader 5 has no
+// supported external position API, so a small expert (written into the terminal
+// the first time the module is on) publishes a text file and performs closes.
+
+void ForceForeground(HWND hwnd);
+void CloseLookupPanel(HWND hwnd);
+
+struct WhatsAppSendArgs {
+    std::wstring chat;
+    std::wstring text;
+};
+DWORD WINAPI WhatsAppSendThread(void* param);
+
+bool IsWhatsAppName(const std::wstring& name) {
+    if (name.empty()) return false;
+    return ToLowerCopy(name).find(L"whatsapp") != std::wstring::npos;
+}
+
+std::wstring TrimCopy(std::wstring value) {
+    const size_t begin = value.find_first_not_of(L" \t\r\n");
+    if (begin == std::wstring::npos) return L"";
+    const size_t end = value.find_last_not_of(L" \t\r\n");
+    return value.substr(begin, end - begin + 1);
+}
+
+void StripTrailingCount(std::wstring* chat) {
+    if (!chat || chat->size() < 4 || chat->back() != L')') return;
+    const size_t open = chat->rfind(L'(');
+    if (open == std::wstring::npos || open == 0) return;
+    for (size_t i = open + 1; i + 1 < chat->size(); ++i) {
+        if (!iswdigit((*chat)[i])) return;
+    }
+    size_t end = open;
+    while (end > 0 && iswspace((*chat)[end - 1])) --end;
+    chat->resize(end);
+}
+
+void PublishWhatsAppMessage(std::wstring chat, std::wstring body, PixelsRef icon) {
+    chat = TrimCopy(std::move(chat));
+    body = TrimCopy(std::move(body));
+    StripTrailingCount(&chat);
+    if (chat.size() > 120) chat.resize(120);
+    if (body.size() > 280) {
+        body.resize(280);
+        body += L"...";
+    }
+    if (chat.empty() && body.empty()) return;
+
+    {
+        std::lock_guard lock(g_stateMutex);
+        WhatsAppSnapshot& card = g_state.whatsApp;
+        const bool sameChat = card.active && card.chat == chat;
+        if (!sameChat) {
+            ++card.id;
+            if (card.status != L"Sending...") card.status.clear();
+        }
+        card.active = true;
+        card.chat = std::move(chat);
+        card.body = std::move(body);
+        if (icon) card.icon = std::move(icon);
+        card.expiresAt = NowSeconds() + 28.0;
+    }
+    TriggerNudge();
+}
+
+size_t Utf16StepBack(const std::wstring& text, size_t index) {
+    if (index == 0) return 0;
+    --index;
+    if (index > 0 && text[index] >= 0xDC00 && text[index] <= 0xDFFF &&
+        text[index - 1] >= 0xD800 && text[index - 1] <= 0xDBFF) {
+        --index;
+    }
+    return index;
+}
+
+size_t Utf16StepForward(const std::wstring& text, size_t index) {
+    if (index >= text.size()) return text.size();
+    if (text[index] >= 0xD800 && text[index] <= 0xDBFF && index + 1 < text.size()) return index + 2;
+    return index + 1;
+}
+
+void SyncWhatsAppDraft(const WhatsAppSnapshot& card) {
+    if (g_waUi.forId == card.id) return;
+    g_waUi.forId = card.id;
+    g_waUi.text.clear();
+    g_waUi.caret = 0;
+    g_waUi.selectAll = false;
+}
+
+void EndWhatsAppSession(HWND hwnd) {
+    if (!g_waUi.composing) return;
+    HWND previous = g_waUi.prevForeground;
+    const bool hadFocus = GetForegroundWindow() == hwnd;
+    g_waUi.composing = false;
+    g_waUi.prevForeground = nullptr;
+    if (g_lookupUi.open) return;
+    const LONG_PTR ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+    SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex | WS_EX_NOACTIVATE);
+    if (hadFocus && previous && IsWindow(previous) && IsWindowVisible(previous)) {
+        SetForegroundWindow(previous);
+    }
+}
+
+void BeginWhatsAppSession(HWND hwnd) {
+    if (g_lookupUi.open) {
+        CloseLookupPanel(hwnd);
+    }
+    if (g_waUi.composing) {
+        ForceForeground(hwnd);
+        return;
+    }
+    HWND previous = GetForegroundWindow();
+    g_waUi.prevForeground = (previous && previous != hwnd) ? previous : nullptr;
+    g_waUi.composing = true;
+    g_waUi.caretResetAt = NowSeconds();
+    if (g_waUi.caret > g_waUi.text.size()) g_waUi.caret = g_waUi.text.size();
+
+    const LONG_PTR ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+    if (ex & WS_EX_NOACTIVATE) {
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex & ~static_cast<LONG_PTR>(WS_EX_NOACTIVATE));
+    }
+    ForceForeground(hwnd);
+    {
+        std::lock_guard lock(g_stateMutex);
+        if (g_state.whatsApp.active) {
+            g_state.whatsApp.expiresAt = std::max(g_state.whatsApp.expiresAt, NowSeconds() + 45.0);
+        }
+    }
+    g_layoutDirty = true;
+}
+
+void InsertWhatsAppText(std::wstring extra) {
+    if (extra.empty()) return;
+    WhatsAppUiState& ui = g_waUi;
+    if (ui.selectAll) {
+        ui.text.clear();
+        ui.caret = 0;
+        ui.selectAll = false;
+    }
+    constexpr size_t kMaxReply = 500;
+    if (ui.text.size() >= kMaxReply) return;
+    if (ui.text.size() + extra.size() > kMaxReply) {
+        extra.resize(kMaxReply - ui.text.size());
+    }
+    ui.text.insert(ui.caret, extra);
+    ui.caret += extra.size();
+    ui.caretResetAt = NowSeconds();
+    g_layoutDirty = true;
+}
+
+bool HandleWhatsAppKeyDown(HWND hwnd, WPARAM vk) {
+    if (!g_waUi.composing) return false;
+    WhatsAppUiState& ui = g_waUi;
+    const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+    bool moved = false;
+
+    switch (vk) {
+        case VK_ESCAPE:
+            {
+                std::lock_guard lock(g_stateMutex);
+                g_state.whatsApp.active = false;
+                g_state.whatsApp.expiresAt = 0.0;
+            }
+            EndWhatsAppSession(hwnd);
+            g_layoutDirty = true;
+            return true;
+        case VK_RETURN:
+            if (!g_waSending.load()) {
+                std::wstring text = TrimCopy(ui.text);
+                std::wstring chat;
+                if (!text.empty()) {
+                    {
+                        std::lock_guard lock(g_stateMutex);
+                        chat = g_state.whatsApp.chat;
+                        g_state.whatsApp.status = L"Sending...";
+                        g_state.whatsApp.expiresAt = NowSeconds() + 15.0;
+                    }
+                    g_waSending.store(true);
+                    EndWhatsAppSession(hwnd);
+                    auto* args = new WhatsAppSendArgs{std::move(chat), std::move(text)};
+                    HANDLE thread = CreateThread(nullptr, 0, WhatsAppSendThread, args, 0, nullptr);
+                    if (!thread) {
+                        delete args;
+                        g_waSending.store(false);
+                        std::lock_guard lock(g_stateMutex);
+                        g_state.whatsApp.status = L"Couldn't send";
+                    } else {
+                        CloseHandle(thread);
+                    }
+                }
+            }
+            g_layoutDirty = true;
+            return true;
+        case VK_LEFT:
+            ui.caret = ui.selectAll ? 0 : Utf16StepBack(ui.text, ui.caret);
+            ui.selectAll = false;
+            moved = true;
+            break;
+        case VK_RIGHT:
+            ui.caret = ui.selectAll ? ui.text.size() : Utf16StepForward(ui.text, ui.caret);
+            ui.selectAll = false;
+            moved = true;
+            break;
+        case VK_HOME:
+            ui.caret = 0;
+            ui.selectAll = false;
+            moved = true;
+            break;
+        case VK_END:
+            ui.caret = ui.text.size();
+            ui.selectAll = false;
+            moved = true;
+            break;
+        case VK_BACK:
+            if (ui.selectAll) {
+                ui.text.clear();
+                ui.caret = 0;
+                ui.selectAll = false;
+            } else if (ui.caret > 0) {
+                const size_t from = Utf16StepBack(ui.text, ui.caret);
+                ui.text.erase(from, ui.caret - from);
+                ui.caret = from;
+            }
+            ui.caretResetAt = NowSeconds();
+            g_layoutDirty = true;
+            return true;
+        case VK_DELETE:
+            if (ui.selectAll) {
+                ui.text.clear();
+                ui.caret = 0;
+                ui.selectAll = false;
+            } else if (ui.caret < ui.text.size()) {
+                const size_t to = Utf16StepForward(ui.text, ui.caret);
+                ui.text.erase(ui.caret, to - ui.caret);
+            }
+            ui.caretResetAt = NowSeconds();
+            g_layoutDirty = true;
+            return true;
+        case 'A':
+            if (!ctrl) return false;
+            ui.selectAll = !ui.text.empty();
+            moved = true;
+            break;
+        case 'V':
+            if (!ctrl) return false;
+            InsertWhatsAppText(TrimCopy(ReadClipboardText(hwnd)));
+            return true;
+        default:
+            return false;
+    }
+    if (moved) {
+        ui.caretResetAt = NowSeconds();
+        g_layoutDirty = true;
+    }
+    return true;
+}
+
+bool HandleWhatsAppChar(wchar_t ch) {
+    if (!g_waUi.composing) return false;
+    if (ch < 0x20 || ch == 0x7F) return true;
+    InsertWhatsAppText(std::wstring(1, ch));
+    g_waUi.selectAll = false;
+    return true;
+}
+
+bool SleepUnlessStopping(DWORD milliseconds) {
+    return WaitForSingleObject(g_stopEvent, milliseconds) == WAIT_TIMEOUT;
+}
+
+void TapVirtualKey(WORD vk) {
+    INPUT inputs[2] = {};
+    inputs[0].type = INPUT_KEYBOARD;
+    inputs[0].ki.wVk = vk;
+    inputs[1] = inputs[0];
+    inputs[1].ki.dwFlags = KEYEVENTF_KEYUP;
+    SendInput(2, inputs, sizeof(INPUT));
+}
+
+void TapCtrlKey(WORD vk) {
+    INPUT inputs[4] = {};
+    inputs[0].type = INPUT_KEYBOARD;
+    inputs[0].ki.wVk = VK_CONTROL;
+    inputs[1].type = INPUT_KEYBOARD;
+    inputs[1].ki.wVk = vk;
+    inputs[2] = inputs[1];
+    inputs[2].ki.dwFlags = KEYEVENTF_KEYUP;
+    inputs[3] = inputs[0];
+    inputs[3].ki.dwFlags = KEYEVENTF_KEYUP;
+    SendInput(4, inputs, sizeof(INPUT));
+}
+
+void TypeUnicodeText(const std::wstring& text) {
+    std::vector<INPUT> inputs;
+    inputs.reserve(text.size() * 2);
+    auto flush = [&]() {
+        if (inputs.empty()) return;
+        SendInput(static_cast<UINT>(inputs.size()), inputs.data(), sizeof(INPUT));
+        inputs.clear();
+    };
+    for (wchar_t ch : text) {
+        if (ch == L'\r' || ch == L'\n' || ch == L'\t') ch = L' ';
+        INPUT down = {};
+        down.type = INPUT_KEYBOARD;
+        down.ki.wScan = ch;
+        down.ki.dwFlags = KEYEVENTF_UNICODE;
+        INPUT up = down;
+        up.ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP;
+        inputs.push_back(down);
+        inputs.push_back(up);
+        if (inputs.size() >= 32) flush();
+    }
+    flush();
+}
+
+void ForceWindowForeground(HWND hwnd) {
+    if (!hwnd) return;
+    HWND foreground = GetForegroundWindow();
+    const DWORD thisThread = GetCurrentThreadId();
+    const DWORD foregroundThread = foreground ? GetWindowThreadProcessId(foreground, nullptr) : 0;
+    const DWORD targetThread = GetWindowThreadProcessId(hwnd, nullptr);
+    if (foregroundThread && foregroundThread != thisThread) AttachThreadInput(thisThread, foregroundThread, TRUE);
+    if (targetThread && targetThread != thisThread) AttachThreadInput(thisThread, targetThread, TRUE);
+    ShowWindow(hwnd, SW_SHOW);
+    if (IsIconic(hwnd)) ShowWindow(hwnd, SW_RESTORE);
+    SetForegroundWindow(hwnd);
+    BringWindowToTop(hwnd);
+    if (foregroundThread && foregroundThread != thisThread) AttachThreadInput(thisThread, foregroundThread, FALSE);
+    if (targetThread && targetThread != thisThread) AttachThreadInput(thisThread, targetThread, FALSE);
+}
+
+struct WhatsAppWindowSearch {
+    HWND best = nullptr;
+    int bestScore = -1;
+};
+
+BOOL CALLBACK EnumWhatsAppWindows(HWND hwnd, LPARAM param) {
+    auto* search = reinterpret_cast<WhatsAppWindowSearch*>(param);
+    if (!IsWindowVisible(hwnd)) return TRUE;
+    wchar_t className[128] = {};
+    wchar_t title[256] = {};
+    GetClassNameW(hwnd, className, ARRAYSIZE(className));
+    if (wcscmp(className, kWindowClass) == 0) return TRUE;
+    GetWindowTextW(hwnd, title, ARRAYSIZE(title));
+
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hwnd, &pid);
+    wchar_t image[MAX_PATH] = {};
+    if (HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid)) {
+        DWORD length = ARRAYSIZE(image);
+        QueryFullProcessImageNameW(process, 0, image, &length);
+        CloseHandle(process);
+    }
+    const wchar_t* baseName = wcsrchr(image, L'\\');
+    const bool processMatch = ToLowerCopy(baseName ? baseName + 1 : image).find(L"whatsapp") != std::wstring::npos;
+    const bool titleMatch = IsWhatsAppName(title);
+    const bool frame = wcscmp(className, L"ApplicationFrameWindow") == 0 ||
+                       wcscmp(className, L"Chrome_WidgetWin_1") == 0;
+    if (!processMatch && !(titleMatch && frame)) return TRUE;
+
+    int score = (processMatch ? 5 : 0) + (titleMatch ? 3 : 0) + (title[0] ? 1 : 0);
+    if (GetWindow(hwnd, GW_OWNER) == nullptr) score += 2;
+    if (score > search->bestScore) {
+        search->bestScore = score;
+        search->best = hwnd;
+    }
+    return TRUE;
+}
+
+bool TrySetWhatsAppComposeText(HWND hwnd, const std::wstring& text) {
+    const HRESULT init = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    if (FAILED(init) && init != RPC_E_CHANGED_MODE) return false;
+    bool wrote = false;
+    IUIAutomation* automation = nullptr;
+    if (SUCCEEDED(CoCreateInstance(__uuidof(CUIAutomation), nullptr, CLSCTX_INPROC_SERVER,
+                                   __uuidof(IUIAutomation), reinterpret_cast<void**>(&automation))) &&
+        automation) {
+        IUIAutomationElement* root = nullptr;
+        if (SUCCEEDED(automation->ElementFromHandle(hwnd, &root)) && root) {
+            IUIAutomationCondition* condition = nullptr;
+            automation->CreateTrueCondition(&condition);
+            IUIAutomationElementArray* elements = nullptr;
+            if (condition &&
+                SUCCEEDED(root->FindAll(TreeScope_Descendants, condition, &elements)) && elements) {
+                int count = 0;
+                elements->get_Length(&count);
+                // The compose box sits at the bottom of a large tree. Cap the walk
+                // but keep the tail, which is where that box actually is.
+                int start = 0;
+                if (count > 700) start = count - 700;
+                IUIAutomationElement* best = nullptr;
+                int bestScore = -1;
+                LONG bestBottom = LONG_MIN;
+                for (int i = start; i < count; ++i) {
+                    IUIAutomationElement* element = nullptr;
+                    if (FAILED(elements->GetElement(i, &element)) || !element) continue;
+                    CONTROLTYPEID type = 0;
+                    element->get_CurrentControlType(&type);
+                    if (type != UIA_EditControlTypeId && type != UIA_DocumentControlTypeId) {
+                        element->Release();
+                        continue;
+                    }
+                    BSTR name = nullptr;
+                    element->get_CurrentName(&name);
+                    const std::wstring lower = ToLowerCopy(name ? name : L"");
+                    if (name) SysFreeString(name);
+                    int score = 1;
+                    if (lower.find(L"message") != std::wstring::npos ||
+                        lower.find(L"mensaje") != std::wstring::npos ||
+                        lower.find(L"mensagem") != std::wstring::npos ||
+                        lower.find(L"nachricht") != std::wstring::npos ||
+                        lower.find(L"messaggio") != std::wstring::npos ||
+                        lower.find(L"сообщ") != std::wstring::npos ||
+                        lower.find(L"メッセージ") != std::wstring::npos ||
+                        lower.find(L"메시지") != std::wstring::npos ||
+                        lower.find(L"消息") != std::wstring::npos ||
+                        lower.find(L"mesaj") != std::wstring::npos) {
+                        score += 5;
+                    }
+                    RECT bounds = {};
+                    element->get_CurrentBoundingRectangle(&bounds);
+                    if (score > bestScore || (score == bestScore && bounds.bottom > bestBottom)) {
+                        if (best) best->Release();
+                        best = element;
+                        bestScore = score;
+                        bestBottom = bounds.bottom;
+                    } else {
+                        element->Release();
+                    }
+                }
+                if (best && bestScore > 1) {
+                    IUnknown* pattern = nullptr;
+                    if (SUCCEEDED(best->GetCurrentPattern(UIA_ValuePatternId, &pattern)) && pattern) {
+                        IUIAutomationValuePattern* value = nullptr;
+                        if (SUCCEEDED(pattern->QueryInterface(__uuidof(IUIAutomationValuePattern),
+                                                             reinterpret_cast<void**>(&value))) &&
+                            value) {
+                            BSTR bstr = SysAllocString(text.c_str());
+                            if (bstr && SUCCEEDED(value->SetValue(bstr))) {
+                                wrote = true;
+                                best->SetFocus();
+                            }
+                            if (bstr) SysFreeString(bstr);
+                            value->Release();
+                        }
+                        pattern->Release();
+                    }
+                }
+                if (best) best->Release();
+                elements->Release();
+            }
+            if (condition) condition->Release();
+            root->Release();
+        }
+        automation->Release();
+    }
+    if (SUCCEEDED(init)) CoUninitialize();
+    return wrote;
+}
+
+bool SendWhatsAppReply(const std::wstring& chat, const std::wstring& text, std::wstring* error) {
+    WhatsAppWindowSearch search;
+    EnumWindows(EnumWhatsAppWindows, reinterpret_cast<LPARAM>(&search));
+    if (!search.best) {
+        if (error) *error = L"WhatsApp isn't open";
+        return false;
+    }
+
+    HWND previous = GetForegroundWindow();
+    ForceWindowForeground(search.best);
+    if (!SleepUnlessStopping(160)) return false;
+
+    // A title that is just the app name is not a chat to search for. In that
+    // case the reply goes to whatever chat WhatsApp already has open.
+    std::wstring query = chat;
+    if (query.size() > 80) query.resize(80);
+    if (!query.empty() && !IsWhatsAppName(query)) {
+        TapCtrlKey('F');
+        if (!SleepUnlessStopping(130)) return false;
+        TapCtrlKey('A');
+        TypeUnicodeText(query);
+        if (!SleepUnlessStopping(220)) return false;
+        TapVirtualKey(VK_RETURN);
+        if (!SleepUnlessStopping(260)) return false;
+    }
+
+    if (!TrySetWhatsAppComposeText(search.best, text)) {
+        TypeUnicodeText(text);
+        if (!SleepUnlessStopping(40)) return false;
+    }
+    TapVirtualKey(VK_RETURN);
+
+    if (previous && previous != search.best && IsWindow(previous)) {
+        ForceWindowForeground(previous);
+    }
+    return true;
+}
+
+DWORD WINAPI WhatsAppSendThread(void* param) {
+    std::unique_ptr<WhatsAppSendArgs> args(static_cast<WhatsAppSendArgs*>(param));
+    std::wstring error;
+    const bool ok = args && SendWhatsAppReply(args->chat, args->text, &error);
+    {
+        std::lock_guard lock(g_stateMutex);
+        if (ok) {
+            g_state.whatsApp.status = L"Sent";
+            g_state.whatsApp.expiresAt = NowSeconds() + 1.8;
+        } else {
+            g_state.whatsApp.status = error.empty() ? L"Couldn't send" : error;
+            g_state.whatsApp.expiresAt = NowSeconds() + 6.0;
+            g_state.whatsApp.active = true;
+        }
+    }
+    g_waSending.store(false);
+    if (HWND hwnd = g_hwnd) {
+        PostMessageW(hwnd, WM_APP_WHATSAPP_DONE, ok ? 1 : 0, 0);
+    }
+    TriggerNudge();
+    return 0;
+}
+
+// Tickets the island has asked the expert to close, and when that request expires.
+std::unordered_map<unsigned long long, double> g_mt5ClosingUntil;
+
+constexpr wchar_t kMt5SnapshotFile[] = L"dynamic_island_mt5.txt";
+
+const char kMt5BridgeSource[] = R"BRIDGE(// DynamicIslandBridge 1
+#property copyright "Dynamic Island for Windows"
+#property version   "1.00"
+#property description "Writes open positions for Dynamic Island and closes tickets the island requests."
+
+#include <Trade/Trade.mqh>
+
+CTrade g_trade;
+uint g_lastWrite = 0;
+
+string SnapshotName() { return "dynamic_island_mt5.txt"; }
+
+int OnInit() {
+   g_trade.SetDeviationInPoints(50);
+   EventSetTimer(1);
+   WriteSnapshot();
+   return INIT_SUCCEEDED;
+}
+
+void OnDeinit(const int reason) {
+   EventKillTimer();
+}
+
+void OnTimer() {
+   HandleCommands();
+   WriteSnapshot();
+}
+
+void OnTick() {
+   HandleCommands();
+   if (GetTickCount() - g_lastWrite < 250) return;
+   WriteSnapshot();
+}
+
+void HandleCommands() {
+   string name;
+   long search = FileFindFirst("dynamic_island_mt5_close_*.txt", name);
+   if (search == INVALID_HANDLE) return;
+   do {
+      int handle = FileOpen(name, FILE_READ | FILE_TXT | FILE_ANSI | FILE_SHARE_READ | FILE_SHARE_WRITE);
+      string line = "";
+      if (handle != INVALID_HANDLE) {
+         line = FileReadString(handle);
+         FileClose(handle);
+      }
+      FileDelete(name);
+      StringTrimLeft(line);
+      StringTrimRight(line);
+      ulong ticket = 0;
+      if (StringFind(line, "close ") == 0)
+         ticket = (ulong)StringToInteger(StringSubstr(line, 6));
+      if (ticket != 0 && PositionSelectByTicket(ticket))
+         g_trade.PositionClose(ticket);
+   } while (FileFindNext(search, name));
+   FileFindClose(search);
+}
+
+void WriteSnapshot() {
+   string body = "login=" + IntegerToString((long)AccountInfoInteger(ACCOUNT_LOGIN)) + "\r\n";
+   body += "server=" + AccountInfoString(ACCOUNT_SERVER) + "\r\n";
+   body += "currency=" + AccountInfoString(ACCOUNT_CURRENCY) + "\r\n";
+   body += "balance=" + DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 2) + "\r\n";
+   body += "equity=" + DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY), 2) + "\r\n";
+   body += "updated=" + IntegerToString((long)TimeGMT()) + "\r\n";
+   int total = PositionsTotal();
+   for (int i = 0; i < total; ++i) {
+      ulong ticket = PositionGetTicket(i);
+      if (ticket == 0) continue;
+      long type = PositionGetInteger(POSITION_TYPE);
+      string side = (type == POSITION_TYPE_BUY) ? "buy" : "sell";
+      body += IntegerToString((long)ticket) + "|"
+            + PositionGetString(POSITION_SYMBOL) + "|"
+            + side + "|"
+            + DoubleToString(PositionGetDouble(POSITION_VOLUME), 2) + "|"
+            + DoubleToString(PositionGetDouble(POSITION_PRICE_OPEN), 8) + "|"
+            + DoubleToString(PositionGetDouble(POSITION_PRICE_CURRENT), 8) + "|"
+            + DoubleToString(PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP), 2) + "|"
+            + DoubleToString(PositionGetDouble(POSITION_SL), 8) + "|"
+            + DoubleToString(PositionGetDouble(POSITION_TP), 8) + "\r\n";
+   }
+   int handle = FileOpen("dynamic_island_mt5.tmp", FILE_WRITE | FILE_REWRITE | FILE_TXT | FILE_UNICODE | FILE_SHARE_READ);
+   if (handle == INVALID_HANDLE) return;
+   FileWriteString(handle, body);
+   FileClose(handle);
+   // FileMove does not replace an existing file, so the previous snapshot has to go first.
+   FileDelete(SnapshotName());
+   if (!FileMove("dynamic_island_mt5.tmp", 0, SnapshotName(), 0)) {
+      int direct = FileOpen(SnapshotName(), FILE_WRITE | FILE_REWRITE | FILE_TXT | FILE_UNICODE | FILE_SHARE_READ);
+      if (direct != INVALID_HANDLE) {
+         FileWriteString(direct, body);
+         FileClose(direct);
+      }
+      FileDelete("dynamic_island_mt5.tmp");
+   }
+   g_lastWrite = GetTickCount();
+}
+)BRIDGE";
+
+bool Mt5DirExists(const std::wstring& path) {
+    const DWORD attr = GetFileAttributesW(path.c_str());
+    return attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+bool Mt5FileExists(const std::wstring& path) {
+    const DWORD attr = GetFileAttributesW(path.c_str());
+    return attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+std::wstring Mt5Parent(std::wstring path) {
+    while (!path.empty() && (path.back() == L'\\' || path.back() == L'/')) path.pop_back();
+    const size_t slash = path.find_last_of(L"\\/");
+    if (slash == std::wstring::npos) return L"";
+    return path.substr(0, slash);
+}
+
+bool Mt5ReadBytes(const std::wstring& path, std::vector<uint8_t>* out) {
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_READ,
+                              FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                              nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return false;
+    LARGE_INTEGER size = {};
+    if (!GetFileSizeEx(file, &size) || size.QuadPart < 0 || size.QuadPart > 1024 * 1024) {
+        CloseHandle(file);
+        return false;
+    }
+    out->resize(static_cast<size_t>(size.QuadPart));
+    DWORD read = 0;
+    const BOOL ok = size.QuadPart == 0 ||
+                    ReadFile(file, out->data(), static_cast<DWORD>(out->size()), &read, nullptr);
+    CloseHandle(file);
+    if (!ok) return false;
+    out->resize(read);
+    return true;
+}
+
+std::wstring Mt5BytesToWide(const std::vector<uint8_t>& bytes) {
+    if (bytes.size() >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE) {
+        const auto* text = reinterpret_cast<const wchar_t*>(bytes.data() + 2);
+        return std::wstring(text, (bytes.size() - 2) / sizeof(wchar_t));
+    }
+    if (bytes.size() >= 8) {
+        int zeros = 0;
+        const size_t samples = std::min<size_t>(bytes.size(), 48);
+        for (size_t i = 1; i < samples; i += 2) {
+            if (bytes[i] == 0) ++zeros;
+        }
+        if (zeros > 8) {
+            const auto* text = reinterpret_cast<const wchar_t*>(bytes.data());
+            return std::wstring(text, bytes.size() / sizeof(wchar_t));
+        }
+    }
+    if (bytes.empty()) return L"";
+    int chars = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+                                    reinterpret_cast<const char*>(bytes.data()),
+                                    static_cast<int>(bytes.size()), nullptr, 0);
+    UINT codePage = CP_UTF8;
+    DWORD flags = MB_ERR_INVALID_CHARS;
+    if (chars <= 0) {
+        codePage = CP_ACP;
+        flags = 0;
+        chars = MultiByteToWideChar(CP_ACP, 0, reinterpret_cast<const char*>(bytes.data()),
+                                    static_cast<int>(bytes.size()), nullptr, 0);
+    }
+    if (chars <= 0) return L"";
+    std::wstring text(static_cast<size_t>(chars), L'\0');
+    MultiByteToWideChar(codePage, flags, reinterpret_cast<const char*>(bytes.data()),
+                        static_cast<int>(bytes.size()), text.data(), chars);
+    return text;
+}
+
+std::wstring Mt5IniValue(const std::wstring& text, const wchar_t* key) {
+    const std::wstring prefix = std::wstring(key) + L"=";
+    size_t pos = 0;
+    while (pos < text.size()) {
+        size_t end = text.find_first_of(L"\r\n", pos);
+        if (end == std::wstring::npos) end = text.size();
+        const std::wstring line = text.substr(pos, end - pos);
+        if (line.size() >= prefix.size() &&
+            _wcsnicmp(line.c_str(), prefix.c_str(), prefix.size()) == 0) {
+            return TrimCopy(line.substr(prefix.size()));
+        }
+        pos = end;
+        while (pos < text.size() && (text[pos] == L'\r' || text[pos] == L'\n')) ++pos;
+    }
+    return L"";
+}
+
+std::vector<std::wstring> Mt5Split(const std::wstring& line, wchar_t separator) {
+    std::vector<std::wstring> parts;
+    size_t pos = 0;
+    while (pos <= line.size()) {
+        const size_t next = line.find(separator, pos);
+        parts.push_back(line.substr(pos, next == std::wstring::npos ? std::wstring::npos : next - pos));
+        if (next == std::wstring::npos) break;
+        pos = next + 1;
+    }
+    return parts;
+}
+
+struct Mt5Terminal {
+    std::wstring dataDir;
+    std::wstring filesDir;
+    std::wstring expertsDir;
+    std::wstring installDir;
+    std::wstring login;
+};
+
+std::wstring Mt5ReadText(const std::wstring& path) {
+    std::vector<uint8_t> bytes;
+    if (!Mt5ReadBytes(path, &bytes)) return L"";
+    std::wstring text = Mt5BytesToWide(bytes);
+    while (!text.empty() && text.back() == L'\0') text.pop_back();
+    return text;
+}
+
+// MQL5 DoubleToString always uses a dot. wcstod follows the Windows locale, so a
+// comma-decimal locale would stop at the dot and turn 1.25 into 1.
+double Mt5ParseDouble(const std::wstring& text) {
+    const wchar_t* p = text.c_str();
+    while (*p == L' ' || *p == L'\t') ++p;
+    double sign = 1.0;
+    if (*p == L'+') {
+        ++p;
+    } else if (*p == L'-') {
+        sign = -1.0;
+        ++p;
+    }
+    double value = 0.0;
+    while (*p >= L'0' && *p <= L'9') {
+        value = value * 10.0 + static_cast<double>(*p - L'0');
+        ++p;
+    }
+    if (*p == L'.') {
+        ++p;
+        double place = 0.1;
+        while (*p >= L'0' && *p <= L'9') {
+            value += static_cast<double>(*p - L'0') * place;
+            place *= 0.1;
+            ++p;
+        }
+    }
+    return sign * value;
+}
+
+void Mt5FillTerminal(Mt5Terminal* terminal) {
+    const std::wstring origin = Mt5ReadText(terminal->dataDir + L"\\origin.txt");
+    terminal->installDir = TrimCopy(origin.substr(0, origin.find_first_of(L"\r\n")));
+    while (!terminal->installDir.empty() &&
+           (terminal->installDir.back() == L'\\' || terminal->installDir.back() == L'/')) {
+        terminal->installDir.pop_back();
+    }
+    const std::wstring common = Mt5ReadText(terminal->dataDir + L"\\config\\common.ini");
+    terminal->login = Mt5IniValue(common, L"Login");
+}
+
+void Mt5ListTerminals(std::vector<Mt5Terminal>* out) {
+    wchar_t appData[MAX_PATH] = {};
+    const DWORD n = GetEnvironmentVariableW(L"APPDATA", appData, ARRAYSIZE(appData));
+    if (n == 0 || n >= ARRAYSIZE(appData)) return;
+    const std::wstring root = std::wstring(appData) + L"\\MetaQuotes\\Terminal";
+    WIN32_FIND_DATAW found = {};
+    HANDLE search = FindFirstFileW((root + L"\\*").c_str(), &found);
+    if (search == INVALID_HANDLE_VALUE) return;
+    do {
+        if (!(found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+        if (found.cFileName[0] == L'.' || _wcsicmp(found.cFileName, L"Common") == 0) continue;
+        Mt5Terminal terminal;
+        terminal.dataDir = root + L"\\" + found.cFileName;
+        terminal.filesDir = terminal.dataDir + L"\\MQL5\\Files";
+        terminal.expertsDir = terminal.dataDir + L"\\MQL5\\Experts";
+        if (!Mt5DirExists(terminal.filesDir) && !Mt5DirExists(terminal.expertsDir)) continue;
+        Mt5FillTerminal(&terminal);
+        out->push_back(std::move(terminal));
+    } while (FindNextFileW(search, &found));
+    FindClose(search);
+}
+
+Mt5Terminal Mt5TerminalFromPath(const std::wstring& configured) {
+    Mt5Terminal terminal;
+    if (configured.empty()) return terminal;
+    std::wstring path = configured;
+    if (Mt5FileExists(path)) {
+        const std::wstring name = path.substr(path.find_last_of(L"\\/") + 1);
+        if (_wcsicmp(name.c_str(), L"terminal64.exe") == 0 || _wcsicmp(name.c_str(), L"terminal.exe") == 0) {
+            const std::wstring install = Mt5Parent(path);
+            std::vector<Mt5Terminal> all;
+            Mt5ListTerminals(&all);
+            for (const Mt5Terminal& candidate : all) {
+                if (_wcsicmp(candidate.installDir.c_str(), install.c_str()) == 0) return candidate;
+            }
+            return terminal;
+        }
+        terminal.filesDir = Mt5Parent(path);
+        std::wstring cursor = terminal.filesDir;
+        if (_wcsicmp(cursor.substr(cursor.find_last_of(L"\\/") + 1).c_str(), L"Files") == 0) {
+            cursor = Mt5Parent(cursor);
+        }
+        if (_wcsicmp(cursor.substr(cursor.find_last_of(L"\\/") + 1).c_str(), L"MQL5") == 0) {
+            terminal.dataDir = Mt5Parent(cursor);
+        }
+    } else if (Mt5DirExists(path)) {
+        if (Mt5DirExists(path + L"\\MQL5\\Files")) {
+            terminal.dataDir = path;
+        } else if (Mt5FileExists(path + L"\\" + kMt5SnapshotFile)) {
+            terminal.filesDir = path;
+        } else {
+            terminal.dataDir = path;
+        }
+    }
+    if (!terminal.dataDir.empty()) {
+        terminal.filesDir = terminal.dataDir + L"\\MQL5\\Files";
+        terminal.expertsDir = terminal.dataDir + L"\\MQL5\\Experts";
+        Mt5FillTerminal(&terminal);
+    }
+    return terminal;
+}
+
+bool Mt5WriteBridge(const Mt5Terminal& terminal) {
+    if (terminal.expertsDir.empty() || !Mt5DirExists(terminal.expertsDir)) return false;
+    const std::wstring mq5 = terminal.expertsDir + L"\\DynamicIslandBridge.mq5";
+    bool rewrite = !Mt5FileExists(mq5);
+    if (!rewrite) {
+        const std::wstring existing = Mt5ReadText(mq5);
+        const bool ours = existing.rfind(L"// DynamicIslandBridge ", 0) == 0;
+        rewrite = ours && existing.rfind(L"// DynamicIslandBridge 1", 0) != 0;
+        if (!ours) return Mt5FileExists(mq5);
+    }
+    if (rewrite) {
+        HANDLE file = CreateFileW(mq5.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (file == INVALID_HANDLE_VALUE) return false;
+        DWORD written = 0;
+        const DWORD bytes = static_cast<DWORD>(sizeof(kMt5BridgeSource) - 1);
+        const BOOL ok = WriteFile(file, kMt5BridgeSource, bytes, &written, nullptr);
+        CloseHandle(file);
+        if (!ok || written != bytes) return false;
+        Wh_Log(L"Wrote MetaTrader 5 bridge expert to %s", mq5.c_str());
+    }
+
+    const std::wstring ex5 = terminal.expertsDir + L"\\DynamicIslandBridge.ex5";
+    WIN32_FILE_ATTRIBUTE_DATA mq5Info = {};
+    WIN32_FILE_ATTRIBUTE_DATA ex5Info = {};
+    const bool haveMq5 = GetFileAttributesExW(mq5.c_str(), GetFileExInfoStandard, &mq5Info);
+    const bool haveEx5 = GetFileAttributesExW(ex5.c_str(), GetFileExInfoStandard, &ex5Info);
+    if (haveEx5 && haveMq5 && CompareFileTime(&ex5Info.ftLastWriteTime, &mq5Info.ftLastWriteTime) >= 0) {
+        return true;
+    }
+    if (terminal.installDir.empty()) return haveEx5;
+    const std::wstring editor = terminal.installDir + L"\\metaeditor64.exe";
+    if (!Mt5FileExists(editor)) return haveEx5;
+
+    std::wstring command = L"\"" + editor + L"\" /compile:\"" + mq5 + L"\" /log";
+    std::vector<wchar_t> mutableCommand(command.begin(), command.end());
+    mutableCommand.push_back(L'\0');
+    STARTUPINFOW startup = {};
+    startup.cb = sizeof(startup);
+    startup.dwFlags = STARTF_USESHOWWINDOW;
+    startup.wShowWindow = SW_HIDE;
+    PROCESS_INFORMATION process = {};
+    if (!CreateProcessW(editor.c_str(), mutableCommand.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
+                        nullptr, terminal.installDir.c_str(), &startup, &process)) {
+        Wh_Log(L"MetaEditor could not compile DynamicIslandBridge.mq5 (%lu). Compile it from MetaEditor and attach it to a chart.", GetLastError());
+        return false;
+    }
+    for (int i = 0; i < 40; ++i) {
+        if (WaitForSingleObject(g_stopEvent, 0) != WAIT_TIMEOUT) break;
+        if (WaitForSingleObject(process.hProcess, 500) != WAIT_TIMEOUT) break;
+    }
+    CloseHandle(process.hProcess);
+    CloseHandle(process.hThread);
+    if (Mt5FileExists(ex5)) {
+        Wh_Log(L"Compiled DynamicIslandBridge.ex5. Attach it to any chart and enable Algo Trading.");
+        return true;
+    }
+    Wh_Log(L"DynamicIslandBridge.mq5 is in Experts, but MetaEditor did not produce an .ex5. Compile it and attach it to a chart with Algo Trading on.");
+    return false;
+}
+
+Mt5Snapshot Mt5ParseSnapshot(const std::wstring& text, const std::wstring& filesDir, const std::wstring& wantedAccount) {
+    Mt5Snapshot snap;
+    snap.filesDir = filesDir;
+    snap.link = Mt5Link::NeedBridge;
+    if (text.empty()) return snap;
+
+    std::wstring body = text;
+    size_t pos = 0;
+    while (pos < body.size()) {
+        size_t end = body.find_first_of(L"\r\n", pos);
+        if (end == std::wstring::npos) end = body.size();
+        const std::wstring line = body.substr(pos, end - pos);
+        pos = end;
+        while (pos < body.size() && (body[pos] == L'\r' || body[pos] == L'\n')) ++pos;
+        if (line.empty()) continue;
+        const size_t eq = line.find(L'=');
+        const size_t pipe = line.find(L'|');
+        if (eq != std::wstring::npos && (pipe == std::wstring::npos || eq < pipe)) {
+            const std::wstring key = line.substr(0, eq);
+            const std::wstring value = line.substr(eq + 1);
+            if (key == L"login") snap.login = value;
+            else if (key == L"server") snap.server = value;
+            else if (key == L"currency") snap.currency = value;
+            else if (key == L"balance") snap.balance = Mt5ParseDouble(value);
+            else if (key == L"equity") snap.equity = Mt5ParseDouble(value);
+            else if (key == L"updated") snap.updatedUnix = wcstoll(value.c_str(), nullptr, 10);
+            continue;
+        }
+        const std::vector<std::wstring> parts = Mt5Split(line, L'|');
+        if (parts.size() < 7) continue;
+        Mt5Position position;
+        position.ticket = std::wcstoull(parts[0].c_str(), nullptr, 10);
+        if (position.ticket == 0) continue;
+        position.symbol = parts[1];
+        position.buy = _wcsicmp(parts[2].c_str(), L"sell") != 0;
+        position.volume = Mt5ParseDouble(parts[3]);
+        position.priceOpen = Mt5ParseDouble(parts[4]);
+        position.priceCurrent = Mt5ParseDouble(parts[5]);
+        position.profit = Mt5ParseDouble(parts[6]);
+        snap.positions.push_back(std::move(position));
+    }
+
+    if (snap.updatedUnix <= 0 && snap.login.empty()) {
+        snap.link = Mt5Link::NeedBridge;
+        snap.detail = L"Attach DynamicIslandBridge to a chart";
+        return snap;
+    }
+    if (!wantedAccount.empty() && snap.login != wantedAccount) {
+        snap.link = Mt5Link::AccountMismatch;
+        snap.positions.clear();
+        snap.detail = L"Account " + wantedAccount + L" is not the open terminal";
+        return snap;
+    }
+
+    const int64_t nowUnix = static_cast<int64_t>(
+        std::chrono::system_clock::to_time_t(std::chrono::system_clock::now()));
+    const bool fresh = snap.updatedUnix > 0 && (nowUnix - snap.updatedUnix) <= 20;
+    snap.link = fresh ? Mt5Link::Live : Mt5Link::Stale;
+    if (!fresh) snap.detail = L"Bridge paused";
+    else if (snap.positions.empty()) snap.detail = L"No open trades";
+    return snap;
+}
+
+void Mt5NoteClosing(Mt5Snapshot* snap) {
+    const double now = NowSeconds();
+    std::unordered_map<unsigned long long, double> still;
+    for (Mt5Position& position : snap->positions) {
+        const auto it = g_mt5ClosingUntil.find(position.ticket);
+        if (it == g_mt5ClosingUntil.end()) continue;
+        if (now <= it->second) {
+            position.closing = true;
+            still.insert(*it);
+        }
+    }
+    g_mt5ClosingUntil.swap(still);
+    const int capacity = Mt5Layout::VisibleRowCapacity(MediaLayout::kExpandedHeight);
+    int offset = g_mt5Scroll.load(std::memory_order_relaxed);
+    const int maxOffset = std::max(0, static_cast<int>(snap->positions.size()) - capacity);
+    if (offset < 0 || offset > maxOffset) {
+        offset = std::clamp(offset, 0, maxOffset);
+        g_mt5Scroll.store(offset);
+    }
+}
+
+bool Mt5WriteClose(const std::wstring& filesDir, unsigned long long ticket) {
+    if (filesDir.empty() || ticket == 0) return false;
+    CreateDirectoryW(filesDir.c_str(), nullptr);
+    // One file per ticket so a second close does not erase a command the
+    // expert has not read yet.
+    wchar_t fileName[96] = {};
+    swprintf_s(fileName, L"dynamic_island_mt5_close_%llu.txt", ticket);
+    const std::wstring finalPath = filesDir + L"\\" + fileName;
+    char line[64] = {};
+    const int count = snprintf(line, sizeof(line), "close %llu\r\n", ticket);
+    if (count <= 0 || static_cast<size_t>(count) >= sizeof(line)) return false;
+    HANDLE file = CreateFileW(finalPath.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr,
+                              CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return false;
+    DWORD written = 0;
+    const DWORD bytes = static_cast<DWORD>(strlen(line));
+    const BOOL ok = WriteFile(file, line, bytes, &written, nullptr);
+    CloseHandle(file);
+    if (!ok || written != bytes) {
+        DeleteFileW(finalPath.c_str());
+        return false;
+    }
+    return true;
+}
+
+void RequestMt5Close(unsigned long long ticket) {
+    std::wstring filesDir;
+    {
+        std::lock_guard lock(g_stateMutex);
+        if (ticket == 0 || g_mt5ClosingUntil.count(ticket)) return;
+        filesDir = g_state.mt5.filesDir;
+        if (filesDir.empty()) return;
+        g_mt5ClosingUntil[ticket] = NowSeconds() + 8.0;
+        for (Mt5Position& position : g_state.mt5.positions) {
+            if (position.ticket == ticket) position.closing = true;
+        }
+    }
+    if (!Mt5WriteClose(filesDir, ticket)) {
+        std::lock_guard lock(g_stateMutex);
+        g_mt5ClosingUntil.erase(ticket);
+        for (Mt5Position& position : g_state.mt5.positions) {
+            if (position.ticket == ticket) position.closing = false;
+        }
+        g_state.mt5.detail = L"Couldn't ask the terminal to close";
+    }
+    g_layoutDirty = true;
+    TriggerNudge();
+}
+
+DWORD WINAPI Mt5ThreadProc(void*) {
+    std::wstring installedFor;
+    while (WaitForSingleObject(g_stopEvent, 500) == WAIT_TIMEOUT) {
+        const Settings settings = GetSettingsCopy();
+        if (!settings.mt5) {
+            std::lock_guard lock(g_stateMutex);
+            if (g_state.mt5.link != Mt5Link::NoTerminal || !g_state.mt5.positions.empty()) {
+                g_state.mt5 = Mt5Snapshot{};
+                g_layoutDirty = true;
+            }
+            continue;
+        }
+
+        std::vector<Mt5Terminal> terminals;
+        if (!settings.mt5DataPath.empty()) {
+            Mt5Terminal configured = Mt5TerminalFromPath(settings.mt5DataPath);
+            if (!configured.filesDir.empty() || !configured.dataDir.empty()) {
+                terminals.push_back(std::move(configured));
+            }
+        }
+        if (terminals.empty()) Mt5ListTerminals(&terminals);
+
+        // Prefer the terminal whose snapshot is actually updating. common.ini's
+        // Login lags behind an account switch, so it is not used as a filter.
+        Mt5Terminal chosen;
+        bool sawAccountElsewhere = false;
+        bool haveChosen = false;
+        int64_t bestUpdated = -1;
+        for (const Mt5Terminal& terminal : terminals) {
+            if (terminal.filesDir.empty() && terminal.dataDir.empty()) continue;
+            const std::wstring snapshotPath = terminal.filesDir + L"\\" + kMt5SnapshotFile;
+            if (!Mt5FileExists(snapshotPath)) {
+                if (!haveChosen) {
+                    chosen = terminal;
+                    haveChosen = true;
+                }
+                continue;
+            }
+            const Mt5Snapshot parsed = Mt5ParseSnapshot(Mt5ReadText(snapshotPath), terminal.filesDir, L"");
+            if (!settings.mt5Account.empty() && !parsed.login.empty() &&
+                parsed.login != settings.mt5Account) {
+                sawAccountElsewhere = true;
+                continue;
+            }
+            if (!haveChosen || parsed.updatedUnix >= bestUpdated) {
+                chosen = terminal;
+                haveChosen = true;
+                bestUpdated = parsed.updatedUnix;
+            }
+        }
+
+        Mt5Snapshot snap;
+        if (chosen.filesDir.empty() && chosen.dataDir.empty()) {
+            snap.link = Mt5Link::NoTerminal;
+            snap.detail = sawAccountElsewhere ? L"Account " + settings.mt5Account + L" is not the open terminal"
+                                              : L"MetaTrader 5 was not found";
+        } else {
+            if (!chosen.expertsDir.empty() && installedFor != chosen.expertsDir) {
+                Mt5WriteBridge(chosen);
+                installedFor = chosen.expertsDir;
+            }
+            const std::wstring snapshotPath = chosen.filesDir + L"\\" + kMt5SnapshotFile;
+            if (!Mt5FileExists(snapshotPath)) {
+                snap.link = Mt5Link::NeedBridge;
+                snap.filesDir = chosen.filesDir;
+                snap.login = chosen.login;
+                snap.detail = L"Attach DynamicIslandBridge to a chart";
+            } else {
+                snap = Mt5ParseSnapshot(Mt5ReadText(snapshotPath), chosen.filesDir, settings.mt5Account);
+            }
+        }
+
+        bool changed = false;
+        {
+            std::lock_guard lock(g_stateMutex);
+            Mt5NoteClosing(&snap);
+            const Mt5Snapshot& prev = g_state.mt5;
+            changed = prev.link != snap.link || prev.detail != snap.detail ||
+                      prev.login != snap.login || prev.server != snap.server ||
+                      prev.currency != snap.currency || prev.balance != snap.balance ||
+                      prev.equity != snap.equity || prev.positions.size() != snap.positions.size();
+            if (!changed) {
+                for (size_t i = 0; i < snap.positions.size(); ++i) {
+                    const Mt5Position& a = prev.positions[i];
+                    const Mt5Position& b = snap.positions[i];
+                    if (a.ticket != b.ticket || a.buy != b.buy || a.closing != b.closing ||
+                        a.symbol != b.symbol || a.volume != b.volume || a.profit != b.profit) {
+                        changed = true;
+                        break;
+                    }
+                }
+            }
+            g_state.mt5 = std::move(snap);
+        }
+        if (changed) g_layoutDirty = true;
+    }
+    return 0;
+}
+
 #if DYNAMIC_ISLAND_HAS_USER_NOTIFICATION_LISTENER
 DWORD WINAPI NotificationThreadProc(void*) {
     winrt::init_apartment(winrt::apartment_type::multi_threaded);
@@ -6119,6 +7440,7 @@ DWORD WINAPI NotificationThreadProc(void*) {
 
                             auto notification = userNotification.Notification();
                             auto binding = notification.Visual().GetBinding(KnownNotificationBindings::ToastGeneric());
+                            std::wstring thirdLine;
                             if (binding) {
                                 auto textElements = binding.GetTextElements();
                                 if (textElements.Size() > 0) {
@@ -6127,6 +7449,33 @@ DWORD WINAPI NotificationThreadProc(void*) {
                                 if (textElements.Size() > 1) {
                                     snapshot.body = textElements.GetAt(1).Text().c_str();
                                 }
+                                if (textElements.Size() > 2) {
+                                    thirdLine = textElements.GetAt(2).Text().c_str();
+                                }
+                            }
+
+                            std::wstring aumid;
+                            try {
+                                aumid = appInfo.AppUserModelId().c_str();
+                            } catch (...) {
+                            }
+                            if (g_settings.whatsApp && (IsWhatsAppName(snapshot.app) || IsWhatsAppName(aumid))) {
+                                std::wstring chat = snapshot.title;
+                                std::wstring message = snapshot.body;
+                                // A title that is only the app name is not a chat. When the
+                                // toast has a third line, the second line is the sender.
+                                if (IsWhatsAppName(chat)) {
+                                    if (!thirdLine.empty()) {
+                                        chat = message;
+                                        message = thirdLine;
+                                    } else {
+                                        chat.clear();
+                                    }
+                                } else if (!thirdLine.empty() && message.empty()) {
+                                    message = thirdLine;
+                                }
+                                PublishWhatsAppMessage(std::move(chat), std::move(message), std::move(snapshot.icon));
+                                continue;
                             }
 
                             if (snapshot.title.empty()) {
@@ -9634,6 +10983,15 @@ void CaptureShellNotification(HWND hwnd) {
         return;
     }
 
+    // The toast listener publishes the reply card with the real sender and body.
+    // A shell toast whose title is just "WhatsApp" would otherwise flash a generic card.
+    if (g_settings.whatsApp && IsWhatsAppName(title)) {
+#if !DYNAMIC_ISLAND_HAS_USER_NOTIFICATION_LISTENER
+        PublishWhatsAppMessage(title, L"", GetWindowIconPixels(hwnd, 64));
+#endif
+        return;
+    }
+
     NotificationSnapshot notification;
     notification.active = true;
     notification.app = L"Notification";
@@ -9714,15 +11072,24 @@ void CaptureShellNotification(HWND hwnd) {
                                 if (!appName.empty() && appName != L"Notification") {
                                     resolvedIcon = FindAppIconByName(appName, 64);
                                 }
-                                std::lock_guard lock(g_stateMutex);
-                                if (g_state.notification.active) {
-                                    if (!appName.empty()) {
-                                        g_state.notification.app = appName;
-                                        if (resolvedIcon) {
-                                            g_state.notification.icon = std::move(resolvedIcon);
+                                if (g_settings.whatsApp && IsWhatsAppName(appName)) {
+#if !DYNAMIC_ISLAND_HAS_USER_NOTIFICATION_LISTENER
+                                    const std::wstring chat = L"";
+                                    PublishWhatsAppMessage(chat, fullText, resolvedIcon);
+#endif
+                                    std::lock_guard lock(g_stateMutex);
+                                    g_state.notification.active = false;
+                                } else {
+                                    std::lock_guard lock(g_stateMutex);
+                                    if (g_state.notification.active) {
+                                        if (!appName.empty()) {
+                                            g_state.notification.app = appName;
+                                            if (resolvedIcon) {
+                                                g_state.notification.icon = std::move(resolvedIcon);
+                                            }
                                         }
+                                        g_state.notification.title = fullText;
                                     }
-                                    g_state.notification.title = fullText;
                                 }
                             }
                         }
@@ -14095,6 +15462,9 @@ class Renderer {
             case IslandKind::SongId:
                 DrawSongId(state, unscaledRect, settings, now);
                 break;
+            case IslandKind::WhatsApp:
+                DrawWhatsApp(state, unscaledRect, now);
+                break;
             case IslandKind::Idle:
             default:
                 DrawIdleDashboard(state, unscaledRect, settings, now);
@@ -15339,6 +16709,134 @@ class Renderer {
             smallTextFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
             smallTextFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
             textBrush_->SetOpacity(0.96f);
+        }
+    }
+
+    void DrawMt5Dashboard(const SharedState& state, D2D1_RECT_F rect, float scale) {
+        const float padX = Mt5Layout::kPadX * scale;
+        const Mt5Snapshot& mt5 = state.mt5;
+
+        const D2D1_RECT_F header = D2D1::RectF(rect.left + padX, rect.top + 14.0f * scale,
+                                               rect.right - padX, rect.top + 34.0f * scale);
+        if (boldTextFormat_) {
+            boldTextFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+            boldTextFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            textBrush_->SetOpacity(0.96f);
+            const wchar_t* title = Loc(L"Trades");
+            target_->DrawTextW(title, static_cast<UINT32>(wcslen(title)), boldTextFormat_.Get(),
+                               header, textBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            boldTextFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+            boldTextFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        }
+
+        double total = 0.0;
+        for (const Mt5Position& position : mt5.positions) total += position.profit;
+        if (!mt5.positions.empty() && smallTextFormat_) {
+            wchar_t profit[48] = {};
+            swprintf_s(profit, L"%+.2f%s%s", total, mt5.currency.empty() ? L"" : L" ", mt5.currency.c_str());
+            ComPtr<ID2D1SolidColorBrush> profitBrush;
+            target_->CreateSolidColorBrush(total >= 0.0 ? D2D1::ColorF(0.30f, 0.82f, 0.48f, 0.95f)
+                                                         : D2D1::ColorF(1.0f, 0.38f, 0.34f, 0.95f),
+                                           &profitBrush);
+            smallTextFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING);
+            smallTextFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            if (profitBrush) {
+                target_->DrawTextW(profit, static_cast<UINT32>(wcslen(profit)), smallTextFormat_.Get(),
+                                   header, profitBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            }
+            smallTextFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+        }
+
+        std::wstring subtitle = mt5.detail;
+        if (mt5.link == Mt5Link::Live || mt5.link == Mt5Link::Stale) {
+            wchar_t equity[96] = {};
+            swprintf_s(equity, L"%s %.2f %s", Loc(L"Equity"), mt5.equity, mt5.currency.c_str());
+            subtitle = equity;
+            if (!mt5.login.empty()) {
+                subtitle += L"  #";
+                subtitle += mt5.login;
+            }
+            if (mt5.link == Mt5Link::Stale) {
+                subtitle += L"  ·  ";
+                subtitle += Loc(L"Bridge paused");
+            }
+        }
+        if (smallTextFormat_ && !subtitle.empty()) {
+            const wchar_t* sub = (mt5.link == Mt5Link::Live || mt5.link == Mt5Link::Stale)
+                                     ? subtitle.c_str()
+                                     : Loc(subtitle.c_str());
+            mutedBrush_->SetOpacity(0.72f);
+            smallTextFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            target_->DrawTextW(sub, static_cast<UINT32>(wcslen(sub)), smallTextFormat_.Get(),
+                               D2D1::RectF(rect.left + padX, rect.top + 32.0f * scale,
+                                           rect.right - padX, rect.top + 48.0f * scale),
+                               mutedBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            smallTextFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+        }
+
+        if (mt5.positions.empty()) return;
+
+        const float listTop = rect.top + Mt5Layout::kListTop * scale;
+        const float rowH = Mt5Layout::kRowHeight * scale;
+        const float rowGap = Mt5Layout::kRowGap * scale;
+        const int capacity = Mt5Layout::VisibleRowCapacity((rect.bottom - rect.top) / std::max(scale, 0.01f));
+        int offset = g_mt5Scroll.load(std::memory_order_relaxed);
+        const int maxOffset = std::max(0, static_cast<int>(mt5.positions.size()) - capacity);
+        if (offset < 0) offset = 0;
+        if (offset > maxOffset) offset = maxOffset;
+        const int hovered = g_hoveredMt5Row.load(std::memory_order_relaxed);
+        const bool closeHovered = g_hoveredMt5Close.load(std::memory_order_relaxed);
+
+        int drawn = 0;
+        for (int index = offset; index < static_cast<int>(mt5.positions.size()) && drawn < capacity; ++index, ++drawn) {
+            const Mt5Position& position = mt5.positions[static_cast<size_t>(index)];
+            const float rowTop = listTop + drawn * (rowH + rowGap);
+            const D2D1_RECT_F row = D2D1::RectF(rect.left + padX, rowTop, rect.right - padX, rowTop + rowH);
+            DrawCard(row, 8.0f * scale, hovered == drawn);
+
+            wchar_t name[96] = {};
+            swprintf_s(name, L"%s   %s   %.2f", position.symbol.c_str(),
+                       position.buy ? Loc(L"Buy") : Loc(L"Sell"), position.volume);
+            wchar_t profit[48] = {};
+            if (position.closing) {
+                wcscpy_s(profit, Loc(L"Closing"));
+            } else {
+                swprintf_s(profit, L"%+.2f", position.profit);
+            }
+
+            const float closeSize = Mt5Layout::kCloseSize * scale;
+            const float closeMargin = Mt5Layout::kCloseMargin * scale;
+            const float closeSpace = position.closing ? 8.0f * scale : closeSize + closeMargin + 6.0f * scale;
+            if (!position.closing) {
+                DrawTrayRemoveButton(D2D1::Point2F(row.right - closeMargin - closeSize * 0.5f,
+                                                   (row.top + row.bottom) * 0.5f),
+                                     closeSize, closeHovered && hovered == drawn, hovered == drawn);
+            }
+
+            if (smallTextFormat_) {
+                smallTextFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+                textBrush_->SetOpacity(0.94f);
+                target_->DrawTextW(name, static_cast<UINT32>(wcslen(name)), smallTextFormat_.Get(),
+                                   D2D1::RectF(row.left + 8.0f * scale, row.top,
+                                               row.right - closeSpace - 72.0f * scale, row.bottom),
+                                   textBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+                D2D1_COLOR_F profitColor = material_.textSecondary;
+                if (!position.closing) {
+                    profitColor = position.profit >= 0.0 ? D2D1::ColorF(0.30f, 0.82f, 0.48f, 0.95f)
+                                                         : D2D1::ColorF(1.0f, 0.38f, 0.34f, 0.95f);
+                }
+                ComPtr<ID2D1SolidColorBrush> profitBrush;
+                target_->CreateSolidColorBrush(profitColor, &profitBrush);
+                smallTextFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING);
+                if (profitBrush) {
+                    target_->DrawTextW(profit, static_cast<UINT32>(wcslen(profit)), smallTextFormat_.Get(),
+                                       D2D1::RectF(row.right - closeSpace - 72.0f * scale, row.top,
+                                                   row.right - closeSpace, row.bottom),
+                                       profitBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+                }
+                smallTextFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+                smallTextFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+            }
         }
     }
 
@@ -16595,6 +18093,7 @@ class Renderer {
             if (settings.weather) activeTabs.push_back(1);
             if (settings.hardwareMonitorModule) activeTabs.push_back(2);
             if (settings.fileTrayModule) activeTabs.push_back(4);
+            if (settings.mt5) activeTabs.push_back(6);
 
             int maxTabs = static_cast<int>(activeTabs.size());
             int tabIdx = NormalizedTabIndex(settings);
@@ -16615,6 +18114,7 @@ class Renderer {
                 else if (activeTabId == 1) DrawWeatherDashboard(state, fullRect, settings, now, scale, hasWeather, wIcon, wText);
                 else if (activeTabId == 2) DrawHardwareMonitorDashboard(state, fullRect, settings, scale);
                 else if (activeTabId == 4) DrawFileTrayDashboard(state, fullRect, settings, scale);
+                else if (activeTabId == 6) DrawMt5Dashboard(state, fullRect, scale);
             });
 
             DrawTabPagination(fullRect, maxTabs);
@@ -17168,6 +18668,7 @@ class Renderer {
             if (settings.hardwareMonitorModule) activeTabs.push_back(3);
             if (settings.fileTrayModule) activeTabs.push_back(4);
             if (settings.lyrics && !lyricsFirst) activeTabs.push_back(5);  // Lyrics (last)
+            if (settings.mt5) activeTabs.push_back(6);  // Trades, always last
 
             // Same settings object as the list above, so the index can't be
             // normalised against a tab set that no longer matches.
@@ -17428,6 +18929,8 @@ class Renderer {
                                     D2D1::RectF(lyricsCx - lyricsW * 0.5f, rect.top,
                                                 lyricsCx + lyricsW * 0.5f, rect.top + lyricsH),
                                     settings, 1.0f);
+            } else if (activeTabId == 6) {
+                DrawMt5Dashboard(state, rect, 1.0f);
             }
             };  // end drawTabContent
 
@@ -20623,6 +22126,108 @@ class Renderer {
         mutedBrush_->SetOpacity(0.58f);
     }
 
+    void DrawWhatsApp(const SharedState& state, D2D1_RECT_F rect, double now) {
+        if (rect.bottom - rect.top < 70.0f || rect.right - rect.left < 160.0f) return;
+        SyncWhatsAppDraft(state.whatsApp);
+
+        const float pad = 12.0f;
+        const float iconSize = 28.0f;
+        const D2D1_RECT_F badge = D2D1::RectF(rect.left + pad, rect.top + 10.0f,
+                                              rect.left + pad + iconSize, rect.top + 10.0f + iconSize);
+        ComPtr<ID2D1SolidColorBrush> plate;
+        target_->CreateSolidColorBrush(D2D1::ColorF(0.11f, 0.65f, 0.36f, 1.0f), &plate);
+        if (plate) {
+            target_->FillRoundedRectangle(D2D1::RoundedRect(badge, 8.0f, 8.0f), plate.Get());
+        }
+        if (state.whatsApp.icon) {
+            DrawRoundedBitmapPixels(*state.whatsApp.icon, badge, 8.0f,
+                                    notificationIconBitmap_, notificationIconGeneration_, 1.0f);
+        } else if (boldTextFormat_) {
+            boldTextFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+            boldTextFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            textBrush_->SetOpacity(0.98f);
+            target_->DrawTextW(L"W", 1, boldTextFormat_.Get(), badge, textBrush_.Get(),
+                               D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            boldTextFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+            boldTextFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        }
+
+        const float textLeft = badge.right + 10.0f;
+        const float textRight = rect.right - pad;
+        const wchar_t* chat = state.whatsApp.chat.empty() ? L"WhatsApp" : state.whatsApp.chat.c_str();
+        if (boldTextFormat_) {
+            boldTextFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+            boldTextFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            textBrush_->SetOpacity(0.96f);
+            target_->DrawTextW(chat, static_cast<UINT32>(wcslen(chat)), boldTextFormat_.Get(),
+                               D2D1::RectF(textLeft, rect.top + 8.0f, textRight, rect.top + 26.0f),
+                               textBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            boldTextFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+            boldTextFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        }
+        if (smallTextFormat_ && !state.whatsApp.body.empty()) {
+            smallTextFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+            smallTextFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+            smallTextFormat_->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
+            mutedBrush_->SetOpacity(0.82f);
+            target_->DrawTextW(state.whatsApp.body.c_str(), static_cast<UINT32>(state.whatsApp.body.size()),
+                               smallTextFormat_.Get(),
+                               D2D1::RectF(textLeft, rect.top + 26.0f, textRight, rect.top + 62.0f),
+                               mutedBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            smallTextFormat_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+        }
+
+        const D2D1_RECT_F field = D2D1::RectF(rect.left + pad, rect.top + 66.0f,
+                                              rect.right - pad, rect.top + 100.0f);
+        DrawCard(field, 8.0f, g_waUi.composing);
+
+        std::wstring shown = g_waUi.text;
+        const bool placeholder = shown.empty();
+        if (placeholder) {
+            if (!state.whatsApp.status.empty()) shown = state.whatsApp.status;
+            else shown = g_waUi.composing ? L"" : Loc(L"Click to reply");
+        }
+        if (smallTextFormat_) {
+            smallTextFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            if (placeholder) mutedBrush_->SetOpacity(0.62f);
+            else textBrush_->SetOpacity(0.96f);
+            ID2D1Brush* brush = placeholder ? static_cast<ID2D1Brush*>(mutedBrush_.Get())
+                                            : static_cast<ID2D1Brush*>(textBrush_.Get());
+            const D2D1_RECT_F textRect = D2D1::RectF(field.left + 10.0f, field.top,
+                                                     field.right - 10.0f, field.bottom);
+            target_->DrawTextW(shown.c_str(), static_cast<UINT32>(shown.size()),
+                               smallTextFormat_.Get(), textRect, brush, D2D1_DRAW_TEXT_OPTIONS_CLIP);
+
+            if (g_waUi.composing && !g_waUi.selectAll && dwriteFactory_) {
+                const bool caretOn = std::fmod(std::max(0.0, now - g_waUi.caretResetAt), 1.0) < 0.55;
+                if (caretOn) {
+                    std::wstring before = g_waUi.text.substr(0, g_waUi.caret);
+                    float caretX = textRect.left;
+                    if (!before.empty()) {
+                        ComPtr<IDWriteTextLayout> layout;
+                        if (SUCCEEDED(dwriteFactory_->CreateTextLayout(
+                                before.c_str(), static_cast<UINT32>(before.size()), smallTextFormat_.Get(),
+                                1000.0f, 30.0f, &layout)) && layout) {
+                            DWRITE_TEXT_METRICS metrics = {};
+                            layout->GetMetrics(&metrics);
+                            caretX += metrics.widthIncludingTrailingWhitespace;
+                        }
+                    }
+                    caretX = std::min(caretX, textRect.right - 2.0f);
+                    ComPtr<ID2D1SolidColorBrush> caret;
+                    target_->CreateSolidColorBrush(material_.textPrimary, &caret);
+                    if (caret) {
+                        target_->DrawLine(D2D1::Point2F(caretX, field.top + 8.0f),
+                                          D2D1::Point2F(caretX, field.bottom - 8.0f), caret.Get(), 1.25f);
+                    }
+                }
+            }
+            smallTextFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+        }
+        textBrush_->SetOpacity(0.96f);
+        mutedBrush_->SetOpacity(0.75f);
+    }
+
     void DrawNotification(const SharedState& state, D2D1_RECT_F rect) {
         if (rect.bottom - rect.top < 48.0f || rect.right - rect.left < 120.0f) return;
         const double now = NowSeconds();
@@ -22328,6 +23933,10 @@ Activity ActivityForKind(IslandKind kind, const Settings& settings, const Shared
                 activity.height = 58.0f;
             }
             break;
+        case IslandKind::WhatsApp:
+            activity.width = 380.0f;
+            activity.height = 112.0f;
+            break;
         case IslandKind::Idle:
         default:
             if (settings.autoHideIdleSeconds == -1 && !state.system.micActive && !state.system.cameraActive) {
@@ -22360,6 +23969,11 @@ std::vector<IslandKind> ChooseActivities(const SharedState& state, const Setting
 
     if (settings.songRecognition && state.songId.active && now < state.songId.expiresAt) {
         activities.push_back(IslandKind::SongId);
+    }
+
+    if (settings.whatsApp && state.whatsApp.active &&
+        (g_waUi.composing || now < state.whatsApp.expiresAt)) {
+        activities.push_back(IslandKind::WhatsApp);
     }
 
     if (state.clipboard.active && now < state.clipboard.expiresAt) {
@@ -23742,16 +25356,31 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
         case WM_KEYDOWN:
             if (HandleLookupKeyDown(hwnd, wParam)) return 0;
+            if (HandleWhatsAppKeyDown(hwnd, wParam)) return 0;
             break;
 
         case WM_CHAR:
             if (HandleLookupChar(static_cast<wchar_t>(wParam))) return 0;
+            if (HandleWhatsAppChar(static_cast<wchar_t>(wParam))) return 0;
             break;
+
+        case WM_APP_WHATSAPP_DONE:
+            // A click during send starts a new draft. Leave that text alone.
+            if (wParam && !g_waUi.composing) {
+                g_waUi.text.clear();
+                g_waUi.caret = 0;
+                g_waUi.selectAll = false;
+            }
+            g_layoutDirty = true;
+            return 0;
 
         case WM_KILLFOCUS:
             // Clicked another window / Alt+Tab / Win key: the search is over.
             if (g_lookupUi.open) {
                 CloseLookupPanel(hwnd);
+            }
+            if (g_waUi.composing && !g_waSending.load()) {
+                EndWhatsAppSession(hwnd);
             }
             return 0;
 
@@ -23766,6 +25395,10 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     GetCursorPos(&cp);
                     ScreenToClient(hwnd, &cp);
                     SetCursor(LoadCursorW(nullptr, LookupCursorAt(cp.x, cp.y)));
+                    return TRUE;
+                }
+                if (g_waUi.composing) {
+                    SetCursor(LoadCursorW(nullptr, IDC_IBEAM));
                     return TRUE;
                 }
                 if (g_scrubbing.load()) {
@@ -23801,6 +25434,11 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 if (g_settings.fileTrayModule && currentTab == FileTrayTabIndex(g_settings) &&
                     (g_hoveredFileTrayRow.load(std::memory_order_relaxed) >= 0 ||
                      g_hoveredFileTrayAction.load(std::memory_order_relaxed) != -1)) {
+                    SetCursor(LoadCursorW(nullptr, IDC_HAND));
+                    return TRUE;
+                }
+                if (g_settings.mt5 && currentTab == Mt5TabIndex(g_settings) &&
+                    g_hoveredMt5Close.load(std::memory_order_relaxed)) {
                     SetCursor(LoadCursorW(nullptr, IDC_HAND));
                     return TRUE;
                 }
@@ -23985,6 +25623,23 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 g_layoutDirty = true;
             }
 
+            int mt5Row = -1;
+            bool mt5Close = false;
+            if (g_settings.mt5 && currentTab == Mt5TabIndex(g_settings)) {
+                int positionCount = 0;
+                {
+                    std::lock_guard lock(g_stateMutex);
+                    positionCount = static_cast<int>(g_state.mt5.positions.size());
+                }
+                const MediaContentPoint mt5Pt = MediaContentFromClient(xPos, yPos);
+                mt5Row = Mt5RowAtContentPoint(mt5Pt, positionCount);
+                mt5Close = mt5Row >= 0 && Mt5CloseHitTest(mt5Pt, mt5Row);
+            }
+            if (g_hoveredMt5Row.exchange(mt5Row) != mt5Row ||
+                g_hoveredMt5Close.exchange(mt5Close) != mt5Close) {
+                g_layoutDirty = true;
+            }
+
             // Pressed on a row and moved past the system drag threshold: pick the file up.
             if (s_trayPressActive) {
                 if (!(wParam & MK_LBUTTON)) {
@@ -24015,6 +25670,9 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 g_layoutDirty = true;
             }
             if (g_hoveredFileTrayAction.exchange(-1) != -1) {
+                g_layoutDirty = true;
+            }
+            if (g_hoveredMt5Row.exchange(-1) != -1 || g_hoveredMt5Close.exchange(false)) {
                 g_layoutDirty = true;
             }
             return 0;
@@ -24095,6 +25753,12 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     kinds = ChooseActivities(g_state, g_settings, NowSeconds());
                 }
 
+                if (!kinds.empty() && kinds[0] == IslandKind::WhatsApp) {
+                    BeginWhatsAppSession(hwnd);
+                    TriggerNudge();
+                    return 0;
+                }
+
                 // Song recognition card: open the track when found, otherwise dismiss / cancel.
                 if (!kinds.empty() && kinds[0] == IslandKind::SongId) {
                     HandleSongIdClick();
@@ -24141,6 +25805,29 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 const int currentTab = NormalizedTabIndex(g_settings);
 
                 const MediaContentPoint cp = MediaContentFromClient(xPos, yPos);
+
+                if (g_settings.mt5 && currentTab == Mt5TabIndex(g_settings)) {
+                    int positionCount = 0;
+                    unsigned long long ticket = 0;
+                    bool closing = false;
+                    {
+                        std::lock_guard lock(g_stateMutex);
+                        positionCount = static_cast<int>(g_state.mt5.positions.size());
+                        const int row = Mt5RowAtContentPoint(cp, positionCount);
+                        if (row >= 0 && Mt5CloseHitTest(cp, row)) {
+                            const int index = row + g_mt5Scroll.load(std::memory_order_relaxed);
+                            if (index >= 0 && index < positionCount) {
+                                const Mt5Position& position = g_state.mt5.positions[static_cast<size_t>(index)];
+                                ticket = position.ticket;
+                                closing = position.closing;
+                            }
+                        }
+                    }
+                    if (ticket != 0 && !closing) {
+                        RequestMt5Close(ticket);
+                        return 0;
+                    }
+                }
 
                 // File Tray: the bin clears the shelf, the cut button removes one file,
                 // and a plain click on a row opens it with its default app. (Dragging a
@@ -24311,6 +25998,26 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             // At the top / bottom edge the list swallows leftover inertia of the same
             // gesture; a fresh gesture there falls through and switches tabs as usual.
             // Over the header or the pagination dots the wheel always switches tabs.
+            if (g_settings.mt5 && NormalizedTabIndex(g_settings) == Mt5TabIndex(g_settings)) {
+                int positionCount = 0;
+                {
+                    std::lock_guard lock(g_stateMutex);
+                    positionCount = static_cast<int>(g_state.mt5.positions.size());
+                }
+                const int capacity = Mt5Layout::VisibleRowCapacity(MediaLayout::kExpandedHeight);
+                const int maxOffset = std::max(0, positionCount - capacity);
+                if (maxOffset > 0) {
+                    const int direction = delta > 0 ? -1 : 1;
+                    const int offset = g_mt5Scroll.load(std::memory_order_relaxed);
+                    const int next = std::clamp(offset + direction, 0, maxOffset);
+                    if (next != offset) {
+                        g_mt5Scroll.store(next);
+                        g_layoutDirty = true;
+                        return 0;
+                    }
+                }
+            }
+
             if (g_fileTrayWheelOn.load(std::memory_order_relaxed) &&
                 g_settings.fileTrayModule &&
                 NormalizedTabIndex(g_settings) == FileTrayTabIndex(g_settings)) {
@@ -24756,6 +26463,14 @@ DWORD WINAPI RenderThreadProc(void*) {
                 g_state.notification.active = false;
                 snapshot.notification.active = false;
             }
+            if (g_state.whatsApp.active) {
+                if (g_waUi.composing) {
+                    g_state.whatsApp.expiresAt = std::max(g_state.whatsApp.expiresAt, now + 20.0);
+                } else if (now >= g_state.whatsApp.expiresAt) {
+                    g_state.whatsApp.active = false;
+                }
+                snapshot.whatsApp = g_state.whatsApp;
+            }
             if (g_state.volume.active && now >= g_state.volume.expiresAt) {
                 g_state.volume.active = false;
                 snapshot.volume.active = false;
@@ -24786,6 +26501,9 @@ DWORD WINAPI RenderThreadProc(void*) {
         if (g_lookupUi.open &&
             (!g_settings.quickLookup || !snapshot.lookup.active || now >= snapshot.lookup.expiresAt)) {
             CloseLookupPanel(hwnd);
+        }
+        if (g_waUi.composing && (!g_settings.whatsApp || !snapshot.whatsApp.active)) {
+            EndWhatsAppSession(hwnd);
         }
 
         const std::vector<IslandKind> kinds = ChooseActivities(snapshot, g_settings, now);
@@ -24891,6 +26609,7 @@ DWORD WINAPI RenderThreadProc(void*) {
                                  primary.kind == IslandKind::DoNotDisturb ||
                                  primary.kind == IslandKind::Lookup ||
                                  primary.kind == IslandKind::SongId ||
+                                 primary.kind == IslandKind::WhatsApp ||
                                  recentTrackChange);
 
         const bool unhideGraceActive = (now < g_hotkeyUnhideUntil.load());
@@ -25048,6 +26767,10 @@ DWORD WINAPI RenderThreadProc(void*) {
 
         if (primary.kind == IslandKind::SongId) {
             secondary.reset();  // no split layout next to the recognition card
+        }
+
+        if (primary.kind == IslandKind::WhatsApp) {
+            secondary.reset();
         }
 
         if (primary.kind == IslandKind::Lookup) {
@@ -25597,6 +27320,7 @@ bool StartThreads() {
     g_notificationThread = CreateThread(nullptr, 0, NotificationThreadProc, nullptr, 0, nullptr);
 #endif
     g_bluetoothThread = CreateThread(nullptr, 0, BluetoothThreadProc, nullptr, 0, nullptr);
+    g_mt5Thread = CreateThread(nullptr, 0, Mt5ThreadProc, nullptr, 0, nullptr);
     SubscribeDndNotification();
 
     return true;
@@ -25614,7 +27338,7 @@ void StopThreads() {
         SetEvent(g_stopEvent);
     }
 
-    HANDLE handles[] = {g_renderThread, g_mediaThread, g_audioThread, g_weatherThread, g_lyricsThread, g_notificationThread, g_keyboardThread, g_mouseThread, g_bluetoothThread};
+    HANDLE handles[] = {g_renderThread, g_mediaThread, g_audioThread, g_weatherThread, g_lyricsThread, g_notificationThread, g_keyboardThread, g_mouseThread, g_bluetoothThread, g_mt5Thread};
     for (HANDLE handle : handles) {
         if (handle) {
             WaitForSingleObject(handle, 3000);
@@ -25633,6 +27357,7 @@ void StopThreads() {
     g_mouseThread = nullptr;
     g_mouseThreadId = 0;
     g_bluetoothThread = nullptr;
+    g_mt5Thread = nullptr;
 
     if (g_stopEvent) {
         CloseHandle(g_stopEvent);
