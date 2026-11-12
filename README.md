@@ -64,6 +64,7 @@ A smooth, interactive overlay for your desktop, inspired by Apple's Dynamic Isla
 - 🎶 **Song Recognition (Shazam):** Identify any track playing on your desktop in seconds — the island listens to your system audio and displays the song title, artist, and cover art with zero API keys required.
 - 💬 **WhatsApp replies:** An incoming WhatsApp Desktop message opens on the island. Click the card, type, and press Enter to send the reply through the WhatsApp window.
 - 📈 **MetaTrader 5 trades:** Scroll to the Trades card to see open positions with live profit and loss, and close a position from its row.
+- ✨ **Copilot:** Turn on Copilot under Modules, then right-click the island and choose Ask Copilot. Type a message and press Enter. The reply from the Windows 11 Copilot app is shown on the card.
 - 📖 **Quick Lookup:** Once enabled under Modules, press `Ctrl+Alt+Space` to open a search box right on the island to instantly find definitions or summaries for words and clipboard text.
 - 🔀 **Cross-Source Media Switching:** Smoothly swap between active playback controls of multiple media apps simultaneously without opening the apps.
 - 💾 **Lyrics Cache:** Fast, local caching of lyrics retrieved from LRCLIB (sending title, artist, album, and duration to look up matching tracks) stored in the mod's storage folder with a tiny disk footprint.
@@ -146,6 +147,7 @@ Found a bug? Have a cool feature idea? We want to hear from you! Please drop an 
 - **[David Ravelo (DavidRaveloU) @GitHub](https://github.com/DavidRaveloU)**: Added selectable audio spectrum styles with a live frequency analyzer, new progress bar styles, optional track-change animations for the title, cover flip, playback controls and pill cover spin, an optional clock in the collapsed media pill, and a brightness slider flyout.
 - **[Retr0dev-jpg @GitHub](https://github.com/Retr0dev-jpg)**: Event-driven volume flyout with animated bar and default device switching, plus a calendar that follows the Windows locale for weekday initials and first day of the week (with a Monday/Sunday override).
 - **WhatsApp replies and MetaTrader 5 trades**: Incoming WhatsApp Desktop messages can be answered from the island, and a Trades card lists open MetaTrader 5 positions with live profit and a per-row close button.
+- **Copilot**: Right-click the island and choose Ask Copilot to type a message and read the reply from the Windows 11 Copilot app. Off until Modules → Copilot is enabled.
 
 ---
 
