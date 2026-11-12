@@ -4,6 +4,24 @@ All notable changes, enhancements, and bug fixes for **Dynamic Island for Window
 
 ---
 
+## [1.5.0] — 2026-11-12
+
+### ✨ New Features
+
+#### 💬 WhatsApp replies
+An incoming WhatsApp Desktop toast can be answered from the island:
+- The card shows the chat and the message. Click it, type, and press Enter to send. Escape dismisses the card.
+- The reply is typed into the running WhatsApp Desktop window (search for the chat, then the message box). WhatsApp has to be open.
+- Uses the same Windows notification access as the notification module. Off until **Modules → WhatsApp replies** is enabled.
+
+#### 📈 MetaTrader 5 trades
+A Trades card in the scroll loop lists open positions:
+- Each row shows the symbol, buy or sell, volume, and live profit (profit plus swap). The header shows the total and the account equity.
+- The X on a row asks the terminal to close that position. No close-all and no stop-loss editing.
+- The first time the module is on, the mod writes `DynamicIslandBridge.mq5` into the terminal's `MQL5\Experts` folder and tries to compile it. Attach that expert to any chart and turn on Algo Trading. Optional **MetaTrader 5 account** (login digits) and **MetaTrader 5 data folder** pick which terminal to follow. Off by default.
+
+---
+
 ## [1.4.0] — 2026-10-20
 
 ### ✨ New Features
