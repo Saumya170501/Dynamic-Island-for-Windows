@@ -6183,6 +6183,7 @@ void UnsubscribeDndNotification() {
 
 void ForceForeground(HWND hwnd);
 void CloseLookupPanel(HWND hwnd);
+std::wstring ReadClipboardText(HWND hwnd);
 
 struct WhatsAppSendArgs {
     std::wstring chat;
